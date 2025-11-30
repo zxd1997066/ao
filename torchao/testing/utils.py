@@ -27,6 +27,7 @@ from torchao.testing.model_architectures import LlamaModelsLlama4Experts
 from torchao.utils import (
     DummyModule,
     get_compute_capability,
+    get_current_accelerator_device,
 )
 
 """
@@ -52,7 +53,7 @@ copy_tests(TorchAOBasicTestCase, MyTestCase, "my_test_case")
 if __name__ == "__main__":
     unittest.main()
 """
-
+_DEVICE = get_current_accelerator_device()
 
 def skip_if_compute_capability_less_than(min_capability):
     import unittest
@@ -677,7 +678,7 @@ class TorchAOIntegrationTestCase(common_utils.TestCase):
         # this happens various times in vllm when slicing weights around
 
         dtype = torch.bfloat16
-        l = torch.nn.Linear(1024, 1024, device="cuda", dtype=dtype)
+        l = torch.nn.Linear(1024, 1024, device=_DEVICE, dtype=dtype)
         quantize_(l, config)
 
         orig = l.weight
@@ -697,9 +698,9 @@ class TorchAOIntegrationTestCase(common_utils.TestCase):
 
         dtype = torch.bfloat16
         with torch.device("meta"):
-            l = torch.nn.Linear(1024, 1024, device="cuda", dtype=dtype)
+            l = torch.nn.Linear(1024, 1024, device=_DEVICE, dtype=dtype)
         l.weight = torch.nn.Parameter(
-            torch.randn(60, 2816, 2048, device="cuda", dtype=dtype)
+            torch.randn(60, 2816, 2048, device=_DEVICE, dtype=dtype)
         )
         quantize_(l, config)
         _w_slice = l.weight[0]
