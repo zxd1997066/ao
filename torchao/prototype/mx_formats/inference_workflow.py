@@ -163,7 +163,7 @@ def _nvfp4_inference_linear_transform(
     module: torch.nn.Linear, config: NVFP4InferenceConfig
 ):
     """Quantization handler for NVFP4InferenceConfig"""
-    if config.mm_config == NVFP4MMConfig.DYNAMIC:
+    if config.mm_config == NVFP4MMConfig.DYNAMIC and torch.cuda.is_available():
         assert is_sm_at_least_100(), (
             "NVFP4 DYNAMIC mode is only supported on sm100+ machines"
         )
