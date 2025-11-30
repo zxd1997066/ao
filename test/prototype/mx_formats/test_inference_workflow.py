@@ -138,7 +138,7 @@ def test_inference_workflow_mx(
     )
 
 
-@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.skipif(
     not torch_version_at_least("2.8.0"), reason="torch.compile requires PyTorch 2.8+"
 )
