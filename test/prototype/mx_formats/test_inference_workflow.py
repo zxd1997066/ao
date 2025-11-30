@@ -27,9 +27,11 @@ from torchao.utils import (
     is_sm_at_least_89,
     is_sm_at_least_100,
     torch_version_at_least,
+    get_current_accelerator_device,
 )
 
 torch.manual_seed(2)
+_DEVICE = get_current_accelerator_device()
 
 if not torch_version_at_least("2.8.0"):
     pytest.skip("Unsupported PyTorch version", allow_module_level=True)
@@ -62,7 +64,7 @@ def cuda_kernel_profiler(kernel_pattern):
     result["found"] = any(kernel_pattern in name for name in kernel_names)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
 @pytest.mark.skipif(
     not torch_version_at_least("2.8.0"), reason="torch.compile requires PyTorch 2.8+"
 )
@@ -90,18 +92,18 @@ def test_inference_workflow_mx(
     # TODO(future): figure out why these CUDA capability conditions are not properly
     # applied when inside `pytest.mark.skipif` for this test
     if elem_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-        if not is_sm_at_least_89():
+        if torch.cuda.is_available() and not is_sm_at_least_89():
             pytest.skip("CUDA capability >= 8.9 required for float8 in triton")
-        elif not is_sm_at_least_100() and not emulate:
+        elif torch.cuda.is_available() and not is_sm_at_least_100() and not emulate:
             pytest.skip("CUDA capability >= 10.0 required for mxfp8 gemm")
     elif elem_dtype == torch.float4_e2m1fn_x2:
-        if not is_sm_at_least_100() and not emulate:
+        if torch.cuda.is_available() and not is_sm_at_least_100() and not emulate:
             pytest.skip("CUDA capability >= 10.0 required for mxfp4 gemm")
         elif compile:
             # TODO(future PR): investigate and fix this
             pytest.skip("mxfp4 + compile currently does not work, low SQNR")
 
-    m = nn.Linear(32, 128, bias=bias, dtype=torch.bfloat16, device="cuda")
+    m = nn.Linear(32, 128, bias=bias, dtype=torch.bfloat16, device=_DEVICE)
     m_mx = copy.deepcopy(m)
 
     if emulate:
@@ -119,7 +121,7 @@ def test_inference_workflow_mx(
     if compile:
         m_mx = torch.compile(m_mx, fullgraph=True)
 
-    x = torch.randn(128, 32, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(128, 32, device=_DEVICE, dtype=torch.bfloat16)
     if x_rank == 3:
         x = x.unsqueeze(0)
 
@@ -136,7 +138,7 @@ def test_inference_workflow_mx(
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
 @pytest.mark.skipif(
     not torch_version_at_least("2.8.0"), reason="torch.compile requires PyTorch 2.8+"
 )
@@ -181,7 +183,7 @@ def test_inference_workflow_nvfp4(
     Tests both DYNAMIC and WEIGHT_ONLY mm_config modes
     """
     # DYNAMIC mode requires SM100+, but WEIGHT_ONLY works on older GPUs
-    if mm_config == NVFP4MMConfig.DYNAMIC and not is_sm_at_least_100():
+    if torch.cuda.is_available() and mm_config == NVFP4MMConfig.DYNAMIC and not is_sm_at_least_100():
         pytest.skip("CUDA capability >= 10.0 required for DYNAMIC float4 gemm")
 
     if bias and inpt_dtype == torch.float32:
@@ -201,7 +203,7 @@ def test_inference_workflow_nvfp4(
 
     batch_size, in_features, out_features = shapes
 
-    m = nn.Linear(in_features, out_features, bias=bias, dtype=inpt_dtype, device="cuda")
+    m = nn.Linear(in_features, out_features, bias=bias, dtype=inpt_dtype, device=_DEVICE)
     m_mx = copy.deepcopy(m)
 
     config = NVFP4InferenceConfig(
@@ -214,7 +216,7 @@ def test_inference_workflow_nvfp4(
     if compile:
         m_mx = torch.compile(m_mx, fullgraph=True, backend="aot_eager")
 
-    x = torch.randn(batch_size, in_features, device="cuda", dtype=inpt_dtype)
+    x = torch.randn(batch_size, in_features, device=_DEVICE, dtype=inpt_dtype)
     if x_rank == 3:
         x = x.unsqueeze(0)
 
@@ -245,7 +247,7 @@ def test_inference_workflow_nvfp4(
 
 
 class VLLMIntegrationTestCase(TorchAOIntegrationTestCase):
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
     @pytest.mark.skipif(
         not torch_version_at_least("2.8.0"),
         reason="torch.compile requires PyTorch 2.8+",
@@ -258,7 +260,7 @@ class VLLMIntegrationTestCase(TorchAOIntegrationTestCase):
         )
         self._test_slice_and_copy_similar_to_vllm(config)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
     @pytest.mark.skipif(
         not torch_version_at_least("2.8.0"),
         reason="torch.compile requires PyTorch 2.8+",
@@ -271,7 +273,7 @@ class VLLMIntegrationTestCase(TorchAOIntegrationTestCase):
         )
         self._test_narrow_similar_to_vllm(config)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
     @pytest.mark.skipif(
         not torch_version_at_least("2.8.0"),
         reason="torch.compile requires PyTorch 2.8+",
