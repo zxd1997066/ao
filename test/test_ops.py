@@ -30,10 +30,14 @@ from torchao.sparsity.marlin import inject_24, marlin_24_workspace, pack_to_marl
 from torchao.utils import (
     compute_max_diff,
     torch_version_at_least,
+    get_current_accelerator_device,
 )
 
 IS_CUDA = torch.cuda.is_available() and torch.version.cuda
 IS_ROCM = torch.cuda.is_available() and torch.version.hip
+IS_XPU = torch.xpu.is_available() and torch.version.xpu
+
+_DEVICE = get_current_accelerator_device()
 
 try:
     import torchao.ops
@@ -66,7 +70,7 @@ class TestOps(TestCase):
         fp16_act = torch.rand(BS, IC).to(dtype) + 0.5
         return floatx_weight.to(device), scale.to(device), fp16_act.to(device)
 
-    @pytest.mark.skipif(not IS_CUDA, reason="CUDA not available")
+    @pytest.mark.skipif(not IS_CUDA and not IS_XPU, reason="GPU not available")
     @parametrize("ebits,mbits", [(3, 2), (2, 2)])
     @parametrize("dtype", [torch.half, torch.bfloat16])
     def test_quant_llm_linear(self, ebits, mbits, dtype):
@@ -75,7 +79,7 @@ class TestOps(TestCase):
         IC = 256
         splitK = 1
         floatx_weight, scale, fp16_act = self._create_floatx_inputs(
-            ebits, mbits, BS, OC, IC, "cuda", dtype
+            ebits, mbits, BS, OC, IC, _DEVICE, dtype
         )
 
         # smoke test
@@ -96,7 +100,7 @@ class TestOps(TestCase):
             test_utils=test_utils,
         )
 
-    @pytest.mark.skipif(not IS_CUDA, reason="CUDA not available")
+    @pytest.mark.skipif(not IS_CUDA and not IS_XPU, reason="GPU not available")
     @parametrize("BS,OC,IC,splitK", [(1, 2048, 4096, 5), (2, 8192, 8192, 6)])
     @parametrize("ebits,mbits", [(3, 2), (2, 2)])
     @parametrize("dtype", [torch.half, torch.bfloat16])
@@ -105,7 +109,7 @@ class TestOps(TestCase):
     ):
         # adapted from https://github.com/usyd-fsalab/fp6_llm/blob/5df6737cca32f604e957e3f63f03ccc2e4d1df0d/tests/python/kernel_test_fpx.py
         floatx_weight, scale, fp16_act = self._create_floatx_inputs(
-            ebits, mbits, BS, OC, IC, "cuda", dtype
+            ebits, mbits, BS, OC, IC, _DEVICE, dtype
         )
 
         results_floatx = torchao.ops.quant_llm_linear(
@@ -364,13 +368,13 @@ def make_test_id(param):
         return f"tiles_{param}"
 
 
-@pytest.mark.skipif(not IS_CUDA, reason="CUDA not available")
+@pytest.mark.skipif(not IS_CUDA and not IS_XPU, reason="GPU not available")
 @pytest.mark.parametrize("shape, inner_k_tiles", TEST_CONFIGS_UNPACK, ids=make_test_id)
 def test_unpack_tensor_core_tiled_layout_correctness(shape, inner_k_tiles):
     N, K = shape
     assert K % (inner_k_tiles * kTileSizeK) == 0 and N % kTileSizeN == 0
 
-    t = torch.randint(0, 16, dtype=torch.int, size=shape, device="cuda")
+    t = torch.randint(0, 16, dtype=torch.int, size=shape, device=_DEVICE)
     t = (t[::, ::2] << 4 | t[::, 1::2]).to(torch.uint8)
     packed_w = torch.ops.aten._convert_weight_to_int4pack(t, inner_k_tiles)
     unpacked = torchao.ops.unpack_tensor_core_tiled_layout(packed_w, inner_k_tiles)
@@ -379,7 +383,7 @@ def test_unpack_tensor_core_tiled_layout_correctness(shape, inner_k_tiles):
 
 
 # TODO: Fix "test_aot_dispatch_dynamic" test failure
-@pytest.mark.skipif(not IS_CUDA, reason="CUDA not available")
+@pytest.mark.skipif(not IS_CUDA and not IS_XPU, reason="GPU not available")
 @pytest.mark.parametrize("shape, inner_k_tiles", TEST_CONFIGS_UNPACK, ids=make_test_id)
 def test_unpack_tensor_core_tiled_layout_op(shape, inner_k_tiles):
     test_utils = [
@@ -390,7 +394,7 @@ def test_unpack_tensor_core_tiled_layout_op(shape, inner_k_tiles):
 
     test_utils.append("test_aot_dispatch_dynamic")
 
-    t = torch.randint(0, 16, dtype=torch.int, size=shape, device="cuda")
+    t = torch.randint(0, 16, dtype=torch.int, size=shape, device=_DEVICE)
     t = (t[::, ::2] << 4 | t[::, 1::2]).to(torch.uint8)
     packed_w = torch.ops.aten._convert_weight_to_int4pack(t, inner_k_tiles)
 
@@ -421,7 +425,7 @@ def dequant_ref(q, scales, zeros, group_size, nbits=4, dtype=torch.bfloat16):
     return dq.reshape(n, k)
 
 
-@pytest.mark.skipif(not IS_CUDA, reason="CUDA not available")
+@pytest.mark.skipif(not IS_CUDA and not IS_XPU, reason="GPU not available")
 @pytest.mark.parametrize(
     "shape, inner_k_tiles, group_size", TEST_CONFIGS_DEQUANT, ids=str
 )
@@ -431,7 +435,7 @@ def test_dequantize_tensor_core_tiled_layout_correctness_quant_dequant(
     n, k = shape
     dtype = torch.bfloat16
 
-    device = "cuda"
+    device = _DEVICE
 
     t = torch.randn(n, k, dtype=dtype, device=device)
     scales, zeros = get_groupwise_affine_qparams(
@@ -488,7 +492,7 @@ def test_dequantize_tensor_core_tiled_layout_correctness_quant_dequant(
 
 
 # This test differs from one above in that it uses `unpack_tensor_core_tiled_layout` to unpack then dequantize
-@pytest.mark.skipif(not IS_CUDA, reason="CUDA not available")
+@pytest.mark.skipif(not IS_CUDA and not IS_XPU, reason="GPU not available")
 @pytest.mark.parametrize(
     "shape, inner_k_tiles, group_size", TEST_CONFIGS_DEQUANT, ids=str
 )
@@ -497,7 +501,7 @@ def test_dequantize_tensor_core_tiled_layout_correctness_unpack_and_dequant(
 ):
     n, k = shape
     dtype = torch.bfloat16
-    device = "cuda"
+    device = _DEVICE
 
     # Quantize and pack
     t = torch.randn(n, k, dtype=dtype, device=device)
@@ -552,13 +556,13 @@ def test_dequantize_tensor_core_tiled_layout_correctness_unpack_and_dequant(
     assert diff_op_ao < 1e-1
 
 
-@pytest.mark.skipif(not IS_CUDA, reason="CUDA not available")
+@pytest.mark.skipif(not IS_CUDA and not IS_XPU, reason="GPU not available")
 @pytest.mark.parametrize(
     "shape, inner_k_tiles, group_size", TEST_CONFIGS_DEQUANT, ids=str
 )
 def test_dequantize_tensor_core_tiled_layout_op(shape, inner_k_tiles, group_size):
     n, k = shape
-    device = "cuda"
+    device = _DEVICE
 
     q = torch.randint(0, 16, shape, dtype=torch.int, device=device)
     q = (q[::, ::2] << 4 | q[::, 1::2]).to(torch.uint8)
@@ -659,7 +663,7 @@ def _symmetric_quantize_with_ref(w: torch.Tensor, num_bits: int, group_size: int
     )
 
 
-@pytest.mark.skipif(not IS_CUDA, reason="CUDA not available")
+@pytest.mark.skipif(not IS_CUDA and not IS_XPU, reason="GPU not available")
 @pytest.mark.parametrize(
     "batch_size, k_chunk, n_chunk, num_bits, group_size, mnk_factors",
     MARLIN_TEST_PARAMS,
@@ -673,9 +677,9 @@ def test_marlin_24(batch_size, k_chunk, n_chunk, num_bits, group_size, mnk_facto
     size_n = n_chunk * n_factor
 
     a_input = torch.randn(
-        (batch_size, size_m, size_k), dtype=torch.float16, device="cuda"
+        (batch_size, size_m, size_k), dtype=torch.float16, device=_DEVICE
     )
-    b_weight = torch.rand((size_k, size_n), dtype=torch.float16, device="cuda")
+    b_weight = torch.rand((size_k, size_n), dtype=torch.float16, device=_DEVICE)
 
     # Inject 2:4 sparsity
     w_24, _ = inject_24(b_weight, size_k, size_n)
@@ -749,7 +753,7 @@ MARLIN_TEST_PARAMS = list(
 )
 
 
-@pytest.mark.skipif(not IS_CUDA, reason="CUDA not available")
+@pytest.mark.skipif(not IS_CUDA and not IS_XPU, reason="GPU not available")
 @pytest.mark.parametrize(
     "batch_size, k_chunk, n_chunk, num_bits, group_size, mnk_factors",
     MARLIN_TEST_PARAMS,
@@ -765,9 +769,9 @@ def test_marlin_qqq(batch_size, k_chunk, n_chunk, num_bits, group_size, mnk_fact
     size_n = n_chunk * n_factor
 
     a_input = torch.randn(
-        (batch_size, size_m, size_k), dtype=torch.float16, device="cuda"
+        (batch_size, size_m, size_k), dtype=torch.float16, device=_DEVICE
     )
-    b_weight = torch.rand((size_n, size_k), dtype=torch.float16, device="cuda")
+    b_weight = torch.rand((size_n, size_k), dtype=torch.float16, device=_DEVICE)
 
     # Reshape input into 2D tensor
     input_2d = a_input.view(-1, a_input.shape[-1])
@@ -838,8 +842,8 @@ def test_swizzle_mm():
 
     test_utils.append("test_aot_dispatch_dynamic")
 
-    mat1 = torch.randint(0, 16, dtype=torch.float, size=(16, 32), device="cuda")
-    mat2 = torch.randint(0, 16, dtype=torch.float, size=(32, 16), device="cuda")
+    mat1 = torch.randint(0, 16, dtype=torch.float, size=(16, 32), device=_DEVICE)
+    mat2 = torch.randint(0, 16, dtype=torch.float, size=(32, 16), device=_DEVICE)
 
     opcheck(
         torch.ops.torchao.swizzle_mm,
