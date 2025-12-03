@@ -13,7 +13,9 @@ import unittest
 import torch
 from parameterized import parameterized
 
-from torchao.utils import is_sm_at_least_90
+from torchao.utils import is_sm_at_least_90, get_current_accelerator_device
+
+_DEVICE = get_current_accelerator_device()
 
 logging.basicConfig(level=logging.INFO)
 
@@ -27,13 +29,13 @@ class TestQuantFlow(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ("cuda", torch.bfloat16),
+            (_DEVICE, torch.bfloat16),
             # TODO: ("cpu", torch.bfloat16),
-            ("cuda", torch.float16),
+            (_DEVICE, torch.float16),
             # TODO: ("cpu", torch.float16),
         ]
     )
-    @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+    @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
     def test_int_mm(self, device, dtype):
         from torchao.kernel import intmm
 
@@ -51,11 +53,11 @@ class TestQuantFlow(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ("cuda", torch.bfloat16),
-            ("cuda", torch.float16),
+            (_DEVICE, torch.bfloat16),
+            (_DEVICE, torch.float16),
         ]
     )
-    @unittest.skipIf(not is_sm_at_least_90(), "Needs H100")
+    @unittest.skipIf(torch.cuda.is_available() and not is_sm_at_least_90(), "Needs H100")
     def test_int_mm_float8(self, device, dtype):
         from torchao.kernel import intmm
 
@@ -70,14 +72,14 @@ class TestQuantFlow(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ("cuda", torch.bfloat16),
+            (_DEVICE, torch.bfloat16),
             ("cpu", torch.bfloat16),
-            ("cuda", torch.float16),
+            (_DEVICE, torch.float16),
             ("cpu", torch.float16),
         ]
     )
     def test_int_scaled_mm(self, device, dtype):
-        if device == "cuda" and not torch.cuda.is_available():
+        if device == _DEVICE and not torch.accelerator.is_available():
             self.skipTest(f"{device} not available")
 
         from torchao.kernel import intmm
