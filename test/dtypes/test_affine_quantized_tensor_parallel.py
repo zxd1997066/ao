@@ -25,6 +25,9 @@ from torchao.quantization import (
     PerTensor,
 )
 from torchao.quantization.quant_api import quantize_
+from torchao.utils import get_current_accelerator_device
+
+_DEVICE = get_current_accelerator_device()
 
 if common_utils.SEED is None:
     common_utils.SEED = 1234
@@ -88,7 +91,7 @@ class TestAffineQuantizedTensorParallel(DTensorTestBase):
         return m
 
     def _test_tp(self, dtype):
-        device = "cuda"
+        device = _DEVICE
         # To make sure different ranks create the same module
         torch.manual_seed(5)
 
@@ -96,14 +99,14 @@ class TestAffineQuantizedTensorParallel(DTensorTestBase):
             def __init__(self, in_features, out_features, **kwargs) -> None:
                 super().__init__(**kwargs)
                 self.linear = torch.nn.Linear(
-                    in_features, out_features, bias=False, device="cuda"
+                    in_features, out_features, bias=False, device=_DEVICE
                 )
 
             def forward(self, x: torch.Tensor) -> torch.Tensor:
                 return self.linear(x)
 
         # Get rank and device
-        device = torch.device(f"cuda:{self.rank % torch.cuda.device_count()}")
+        device = torch.device(f"{_DEVICE}:{self.rank % torch.accelerator.device_count()}")
 
         # Original model
         proj_up = M(1024, 2048).to(device).to(dtype)
@@ -116,7 +119,7 @@ class TestAffineQuantizedTensorParallel(DTensorTestBase):
         dn_quant(up_quant(example_input))
 
         mesh = self.build_device_mesh()
-        mesh._device_type = "cuda"
+        mesh._device_type = _DEVICE
 
         # Shard the models
         up_dist = self.colwise_shard(up_quant, mesh)
@@ -139,7 +142,7 @@ class TestInt8woAffineQuantizedTensorParallel(TestAffineQuantizedTensorParallel)
 
     @common_utils.parametrize("dtype", COMMON_DTYPES)
     @with_comms
-    @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+    @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
     def test_tp(self, dtype):
         return self._test_tp(dtype)
 
@@ -151,7 +154,7 @@ class TestInt4woAffineQuantizedTensorParallel(TestAffineQuantizedTensorParallel)
 
     @common_utils.parametrize("dtype", COMMON_DTYPES)
     @with_comms
-    @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+    @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
     @unittest.skip(
         "This doesn't work right now with the new constraint of aliasing, "
         "we'll look into this later"
@@ -165,7 +168,7 @@ class TestGemliteLayoutTensorParallel(TestAffineQuantizedTensorParallel):
 
     @common_utils.parametrize("dtype", COMMON_DTYPES)
     @with_comms
-    @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+    @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
     @unittest.skipIf(not has_gemlite, "gemlite not available")
     def test_tp_gemlite(self, dtype):
         from torchao.quantization import GemliteUIntXWeightOnlyConfig
@@ -186,7 +189,7 @@ class TestInt8dqAffineQuantizedTensorParallel(TestAffineQuantizedTensorParallel)
 
     @common_utils.parametrize("dtype", COMMON_DTYPES)
     @with_comms
-    @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+    @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
     def test_tp(self, dtype):
         return self._test_tp(dtype)
 
@@ -197,7 +200,7 @@ common_utils.instantiate_parametrized_tests(TestGemliteLayoutTensorParallel)
 common_utils.instantiate_parametrized_tests(TestInt8dqAffineQuantizedTensorParallel)
 
 # Run only on H100
-if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0):
+if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0) or torch.xpu.is_available():
 
     class TestFloat8woAffineQuantizedTensorParallel(TestAffineQuantizedTensorParallel):
         QUANT_METHOD_FN = staticmethod(Float8WeightOnlyConfig)
@@ -205,7 +208,7 @@ if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0):
 
         @common_utils.parametrize("dtype", COMMON_DTYPES)
         @with_comms
-        @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+        @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
         def test_tp(self, dtype):
             return self._test_tp(dtype)
 
@@ -218,7 +221,7 @@ if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0):
 
         @common_utils.parametrize("dtype", COMMON_DTYPES)
         @with_comms
-        @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+        @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
         def test_tp(self, dtype):
             return self._test_tp(dtype)
 
@@ -231,7 +234,7 @@ if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (9, 0):
 
         @common_utils.parametrize("dtype", COMMON_DTYPES)
         @with_comms
-        @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+        @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
         def test_tp(self, dtype):
             return self._test_tp(dtype)
 
