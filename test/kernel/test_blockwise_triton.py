@@ -17,7 +17,9 @@ from torchao.kernel.blockwise_quantization import (
     fp8_blockwise_weight_dequant,
     fp8_blockwise_weight_quant,
 )
-from torchao.utils import is_sm_at_least_89
+from torchao.utils import is_sm_at_least_89, get_current_accelerator_device
+
+_DEVICE = get_current_accelerator_device()
 
 BLOCKWISE_SIZE_MNK = [
     (2, 512, 128),
@@ -29,7 +31,7 @@ BLOCKWISE_SIZE_MNK = [
 ]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
 @pytest.mark.parametrize("_, N, K", BLOCKWISE_SIZE_MNK)
 @pytest.mark.parametrize(
     "dtype",
@@ -38,7 +40,7 @@ BLOCKWISE_SIZE_MNK = [
     else [torch.float8_e5m2],
 )
 def test_blockwise_quant_dequant(_, N, K, dtype):
-    x = torch.randn(N, K).cuda()
+    x = torch.randn(N, K).to(_DEVICE)
     qx, s = fp8_blockwise_weight_quant(x, dtype=dtype)
     x_reconstructed = fp8_blockwise_weight_dequant(qx, s)
     error = torch.linalg.vector_norm(x - x_reconstructed) / torch.linalg.vector_norm(x)
@@ -47,7 +49,7 @@ def test_blockwise_quant_dequant(_, N, K, dtype):
     assert error < 0.1, "Quant-Dequant error is too high"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
 @pytest.mark.skipif(
     version.parse(triton.__version__) < version.parse("3.3.0"),
     reason="Triton version < 3.3.0, test skipped",
@@ -60,8 +62,8 @@ def test_blockwise_quant_dequant(_, N, K, dtype):
     else [torch.float8_e5m2],
 )
 def test_blockwise_fp8_gemm(M, N, K, dtype):
-    A = torch.randn(M, K).cuda()
-    B = torch.randn(N, K).cuda()
+    A = torch.randn(M, K).to(_DEVICE)
+    B = torch.randn(N, K).to(_DEVICE)
     C = A @ B.T
     A_q, A_s = fp8_blockwise_act_quant(A, dtype=dtype)
     B_q, B_s = fp8_blockwise_weight_quant(B, dtype=dtype)
