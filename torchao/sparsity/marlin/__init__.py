@@ -5,7 +5,9 @@ import torch
 import torchao.sparsity.marlin.utils as utils
 from torchao.sparsity.marlin.utils import const
 from torchao.sparsity.utils import mask_creator
+from torchao.utils import get_current_accelerator_device
 
+_DEVICE = get_current_accelerator_device()
 __all__ = [
     "inject_24",
     "marlin_24_workspace",
@@ -29,7 +31,7 @@ def inject_24(
         Tuple[torch.Tensor, torch.Tensor]: The pruned weight tensor and the mask tensor.
     """
     assert w.shape == (size_k, size_n)
-    mask = mask_creator(w.t()).t().cuda().bool()
+    mask = mask_creator(w.t()).t().to(_DEVICE).bool()
     return (mask * w).contiguous(), mask.contiguous()
 
 
@@ -52,7 +54,7 @@ def marlin_24_workspace(
         f"out_features = {out_features}, min_thread_n = {min_thread_n}"
     )
     max_workspace_size = (out_features // min_thread_n) * max_parallel
-    return torch.zeros(max_workspace_size, dtype=torch.int, device="cuda")
+    return torch.zeros(max_workspace_size, dtype=torch.int, device=_DEVICE)
 
 
 def pack_to_marlin_24(
