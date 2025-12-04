@@ -95,7 +95,9 @@ def register_custom_op_impl(name):
 
 @functools.lru_cache
 def cached_compute_capability():
-    device_props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    _DEVICE = torch.accelerator.current_accelerator()
+    device_module = torch.get_device_module(_DEVICE)
+    device_props = device_module.get_device_properties(torch.accelerator.current_device_index())
     compute_capability = device_props.major * 10 + device_props.minor
     return compute_capability
 
