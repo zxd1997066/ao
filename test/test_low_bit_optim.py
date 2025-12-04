@@ -422,7 +422,7 @@ class TestOptim(TestCase):
             torch.testing.assert_close(p2, p1)
 
     def test_optim_bf16_stochastic_round_correctness(self):
-        device = _DEVICE if torch.accelerator.is_available() else "cpu"
+        device = _DEVICE.type if torch.accelerator.is_available() else "cpu"
         torch.manual_seed(2024)
         model1 = nn.Sequential(nn.Linear(32, 1024), nn.ReLU(), nn.Linear(1024, 128))
         model1.to(device)
@@ -477,7 +477,7 @@ class TestFSDP2(FSDPTest):
             (optim.AdamW4bit, OffloadPolicy),
             (optim.AdamW8bit, CPUOffloadPolicy),
         ]
-        if torch.cuda.get_device_capability() >= (8, 9) or torch.xpu.is_available():
+        if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9):
             args_list.append((optim.AdamWFp8, OffloadPolicy))
 
         self.run_subtests(
