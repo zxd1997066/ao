@@ -39,7 +39,7 @@ from torchao.optim.quant_utils import (
 from torchao.optim.subclass_4bit import OptimState4bit
 from torchao.optim.subclass_8bit import OptimState8bit
 from torchao.optim.subclass_fp8 import OptimStateFp8
-from torchao.testing.utils import skip_if_rocm
+from torchao.testing.utils import skip_if_rocm, skip_if_xpu
 from torchao.utils import (
     get_available_devices,
     torch_version_at_least,
@@ -108,6 +108,7 @@ class TestQuantize(TestCase):
 
     @parametrize("device", _DEVICES)
     @parametrize("compile", [False, True])
+    @skip_if_xpu("XPU enablement in progress")
     def test_bf16_stochastic_round(self, device, compile):
         x = torch.rand(32, device=device) * 100
         x_rep = x.view(-1, 1).repeat(1, 100_000)
@@ -470,6 +471,7 @@ class TestFSDP2(FSDPTest):
 
     @skip_if_lt_x_gpu(_FSDP_WORLD_SIZE)
     @skip_if_rocm("ROCm enablement in progress")
+    @skip_if_xpu("XPU enablement in progress")
     def test_fsdp2(self):
         # we do this to avoid all combinations
         args_list = [
