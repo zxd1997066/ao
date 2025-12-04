@@ -421,13 +421,8 @@ class TestOptim(TestCase):
         for p1, p2 in zip(model1.parameters(), model2.parameters()):
             torch.testing.assert_close(p2, p1)
 
-<<<<<<< HEAD
-    @parametrize("device", _DEVICES)
-    def test_optim_bf16_stochastic_round_correctness(self, device):
-=======
     def test_optim_bf16_stochastic_round_correctness(self):
         device = _DEVICE if torch.accelerator.is_available() else "cpu"
->>>>>>> 7ba0441a0 (add test/test_low_bit_optim.py)
         torch.manual_seed(2024)
         model1 = nn.Sequential(nn.Linear(32, 1024), nn.ReLU(), nn.Linear(1024, 128))
         model1.to(device)
