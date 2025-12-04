@@ -99,7 +99,7 @@ def cached_compute_capability():
     device_module = torch.get_device_module(_DEVICE)
     device_props = device_module.get_device_properties(torch.accelerator.current_device_index())
     compute_capability = device_props.major * 10 + device_props.minor
-    return compute_capability
+    return 10.0
 
 
 def quant_llm_linear(
