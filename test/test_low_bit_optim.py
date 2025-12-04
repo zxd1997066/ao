@@ -43,6 +43,7 @@ from torchao.testing.utils import skip_if_rocm
 from torchao.utils import (
     get_available_devices,
     torch_version_at_least,
+    get_current_accelerator_device,
 )
 
 try:
@@ -59,6 +60,7 @@ if torch.version.hip is not None:
     pytest.skip("Skipping the test in ROCm", allow_module_level=True)
 
 _DEVICES = get_available_devices()
+_DEVICE = get_current_accelerator_device()
 
 
 class TestQuantize(TestCase):
@@ -237,8 +239,8 @@ class TestOptim(TestCase):
 
     @pytest.mark.skipif(bnb is None, reason="bitsandbytes is not available")
     @pytest.mark.skipif(
-        not torch.cuda.is_available(),
-        reason="bitsandbytes 8-bit Adam only works for CUDA",
+        not torch.accelerator.is_available(),
+        reason="bitsandbytes 8-bit Adam only works for GPU",
     )
     @skip_if_rocm("ROCm enablement in progress")
     @pytest.mark.skipif(
@@ -246,7 +248,7 @@ class TestOptim(TestCase):
     )  # TODO: fix this
     @parametrize("optim_name", ["Adam8bit", "AdamW8bit"])
     def test_optim_8bit_correctness(self, optim_name):
-        device = "cuda"
+        device = _DEVICE
         model1 = nn.Sequential(nn.Linear(32, 1024), nn.ReLU(), nn.Linear(1024, 128))
         model1.to(device)
         model2 = copy.deepcopy(model1)
@@ -276,11 +278,11 @@ class TestOptim(TestCase):
     # this will not run in CI because we can't install lpmm
     @pytest.mark.skipif(lpmm is None, reason="lpmm is not available")
     @pytest.mark.skipif(
-        not torch.cuda.is_available(), reason="lpmm 4-bit Adam only works for CUDA"
+        not torch.accelerator.is_available(), reason="lpmm 4-bit Adam only works for GPU"
     )
     @parametrize("optim_name", ["Adam4bit", "AdamW4bit"])
     def test_optim_4bit_correctness(self, optim_name):
-        device = "cuda"
+        device = _DEVICE
         model1 = nn.Sequential(nn.Linear(32, 1024), nn.ReLU(), nn.Linear(1024, 128))
         model1.to(device)
         model2 = copy.deepcopy(model1)
@@ -419,8 +421,13 @@ class TestOptim(TestCase):
         for p1, p2 in zip(model1.parameters(), model2.parameters()):
             torch.testing.assert_close(p2, p1)
 
+<<<<<<< HEAD
     @parametrize("device", _DEVICES)
     def test_optim_bf16_stochastic_round_correctness(self, device):
+=======
+    def test_optim_bf16_stochastic_round_correctness(self):
+        device = _DEVICE if torch.accelerator.is_available() else "cpu"
+>>>>>>> 7ba0441a0 (add test/test_low_bit_optim.py)
         torch.manual_seed(2024)
         model1 = nn.Sequential(nn.Linear(32, 1024), nn.ReLU(), nn.Linear(1024, 128))
         model1.to(device)
@@ -475,7 +482,7 @@ class TestFSDP2(FSDPTest):
             (optim.AdamW4bit, OffloadPolicy),
             (optim.AdamW8bit, CPUOffloadPolicy),
         ]
-        if torch.cuda.get_device_capability() >= (8, 9):
+        if torch.cuda.get_device_capability() >= (8, 9) or torch.xpu.is_available():
             args_list.append((optim.AdamWFp8, OffloadPolicy))
 
         self.run_subtests(
@@ -508,7 +515,7 @@ class TestFSDP2(FSDPTest):
             dropout_p=0,
         )
         torch.manual_seed(42)
-        with torch.device("cuda"):
+        with torch.device(_DEVICE):
             base_model = Transformer(model_args)
         base_optim = optim_cls(base_model.parameters(), lr=1e-2)
 
@@ -521,7 +528,7 @@ class TestFSDP2(FSDPTest):
 
         torch.manual_seed(42 + self.rank + 1)
         for iter_idx in range(5):
-            inp = torch.randint(0, vocab_size, (batch_size, seq_len), device="cuda")
+            inp = torch.randint(0, vocab_size, (batch_size, seq_len), device=_DEVICE)
             fsdp_optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
             fsdp_loss = fsdp_model(inp).mean()
             fsdp_loss.backward()
@@ -588,7 +595,7 @@ class TestFSDP2(FSDPTest):
         out_dim = _FSDP_WORLD_SIZE * 16 + 1
 
         # 1st dim of linear weight will not be divisible by WORLD_SIZE
-        model = nn.Linear(in_dim, out_dim, device="cuda")
+        model = nn.Linear(in_dim, out_dim, device=_DEVICE)
         assert model.weight.shape[0] % _FSDP_WORLD_SIZE != 0
         fully_shard(model)
 
@@ -597,7 +604,7 @@ class TestFSDP2(FSDPTest):
         optimizer = optim.AdamW8bit(model.parameters())
 
         for _ in range(2):
-            inputs = torch.randn(2, in_dim, device="cuda")
+            inputs = torch.randn(2, in_dim, device=_DEVICE)
             model(inputs).sum().backward()
             optimizer.step()
             optimizer.zero_grad()
