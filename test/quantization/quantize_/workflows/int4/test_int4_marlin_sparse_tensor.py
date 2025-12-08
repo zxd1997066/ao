@@ -22,8 +22,9 @@ from torchao.quantization import (
 from torchao.quantization.utils import compute_error
 from torchao.sparsity.sparse_api import apply_fake_sparsity
 from torchao.testing.utils import skip_if_rocm
-from torchao.utils import torch_version_at_least
+from torchao.utils import torch_version_at_least, get_current_accelerator_device
 
+_DEVICE = get_current_accelerator_device()
 BF16_ACT_CONFIG = Int4WeightOnlyConfig(
     group_size=128,
     int4_packing_format="marlin_sparse",
@@ -31,10 +32,10 @@ BF16_ACT_CONFIG = Int4WeightOnlyConfig(
 
 
 @unittest.skipIf(not torch_version_at_least("2.8.0"), "Need pytorch 2.8+")
-@unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+@unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
 class TestInt4MarlinSparseTensor(TestCase):
     def setUp(self):
-        self.GPU_DEVICES = ["cuda"] if torch.cuda.is_available() else []
+        self.GPU_DEVICES = [_DEVICE] if torch.accelerator.is_available() else []
 
     @skip_if_rocm("ROCm enablement in progress")
     @parametrize("config", [BF16_ACT_CONFIG])
@@ -48,7 +49,7 @@ class TestInt4MarlinSparseTensor(TestCase):
     )
     def test_linear(self, config, sizes):
         dtype = torch.float16
-        device = "cuda"
+        device = _DEVICE
 
         M, N, K = sizes
         input = torch.randn(*M, K, dtype=dtype, device=device)
@@ -85,7 +86,7 @@ class TestInt4MarlinSparseTensor(TestCase):
     @parametrize("config", [BF16_ACT_CONFIG])
     def test_module_path(self, config):
         linear = torch.nn.Linear(128, 256, dtype=torch.bfloat16)
-        quantize_(linear.cuda(), config)
+        quantize_(linear.to(_DEVICE), config)
         self.assertEqual(
             str(type(linear.weight)),
             "<class 'torchao.quantization.Int4MarlinSparseTensor'>",
