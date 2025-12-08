@@ -9,8 +9,13 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from torchao.testing.utils import skip_if_no_cuda
-from torchao.utils import TorchAOBaseTensor, torch_version_at_least
+from torchao.utils import (
+    TorchAOBaseTensor,
+    get_current_accelerator_device,
+    torch_version_at_least,
+)
+
+_DEVICE = get_current_accelerator_device()
 
 
 class TestTorchVersion(unittest.TestCase):
@@ -96,13 +101,13 @@ class TestTorchAOBaseTensor(unittest.TestCase):
         self.assertEqual(lp_tensor.attr, reconstructed.attr)
 
         # test _get_to_kwargs
-        _ = lp_tensor._get_to_kwargs(torch.strided, device="cuda")
-        _ = lp_tensor._get_to_kwargs(layout=torch.strided, device="cuda")
+        _ = lp_tensor._get_to_kwargs(torch.strided, device=_DEVICE)
+        _ = lp_tensor._get_to_kwargs(layout=torch.strided, device=_DEVICE)
 
         # `to` / `_to_copy`
         original_device = lp_tensor.device
-        lp_tensor = lp_tensor.to("cuda")
-        self.assertEqual(lp_tensor.device.type, "cuda")
+        lp_tensor = lp_tensor.to(_DEVICE)
+        self.assertEqual(lp_tensor.device.type, _DEVICE.type)
         lp_tensor = lp_tensor.to(original_device)
         self.assertEqual(lp_tensor.device, original_device)
 
@@ -185,7 +190,7 @@ class TestTorchAOBaseTensor(unittest.TestCase):
                 getattr(lp_tensor, tensor_attribute_name),
             )
 
-    @skip_if_no_cuda()
+    @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
     def test_default_impls(self):
         """Making sure some common functions has default implementations, such as
         __tensor_unflatten__, __tensor_flatten__, _apply_fn_to_data, __repr__, to
@@ -215,7 +220,7 @@ class TestTorchAOBaseTensor(unittest.TestCase):
         lp_tensor_for_copy = MyTensor(another_tensor, "attr", None)
         self._test_default_impls_helper(lp_tensor, lp_tensor_for_copy)
 
-    @skip_if_no_cuda()
+    @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
     def test_default_impls_with_optional_data(self):
         class MyTensorWithOptionalData(TorchAOBaseTensor):
             tensor_data_names = ["qdata"]
@@ -252,7 +257,7 @@ class TestTorchAOBaseTensor(unittest.TestCase):
         )
         self._test_default_impls_helper(lp_tensor, lp_tensor_for_copy)
 
-    @skip_if_no_cuda()
+    @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
     def test_default_impls_with_optional_attr(self):
         class MyTensorWithOptionalData(TorchAOBaseTensor):
             tensor_data_names = ["qdata"]
