@@ -123,11 +123,12 @@ def quant_llm_linear(
         output of linear layer
     """
     # Check if we're on a supported architecture (sm7.5 or higher)
-    compute_capability = cached_compute_capability()
-    torch._check(
-        compute_capability >= 75,
-        lambda: f"quant_llm_linear requires sm7.5+ GPU architecture, but current device has sm{compute_capability}",
-    )
+    if torch.cuda.is_available():
+        compute_capability = cached_compute_capability()
+        torch._check(
+            compute_capability >= 75,
+            lambda: f"quant_llm_linear requires sm7.5+ GPU architecture, but current device has sm{compute_capability}",
+        )
     return torch.ops.torchao.quant_llm_linear.default(
         EXPONENT, MANTISSA, _in_feats, _weights, _scales, splitK
     )
