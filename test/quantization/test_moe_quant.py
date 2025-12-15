@@ -54,7 +54,7 @@ class TestMoEQuantCompile(unittest.TestCase):
         base_class=AffineQuantizedTensor,
         tensor_impl_class=None,
         dtype=torch.bfloat16,
-        device="cuda",
+        device="xpu",
         fullgraph=False,
     ):
         """
