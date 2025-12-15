@@ -1643,7 +1643,7 @@ class TestAutoQuant(unittest.TestCase):
 
     @unittest.skipIf(not torch.accelerator.is_available(), "Need CUDA available")
     def test_autoquant_hp_float(self):
-        device = "cuda"
+        device = _DEVICE
         dtype = torch.float32
         m, k, n = 128, 128, 128
         example_input = torch.randn(m, k, device=device, dtype=dtype)
