@@ -285,13 +285,15 @@ def _check_hardware_support(
     is_a_1_128_w_128_128 = _granularity_is_a_1_128_w_128_128(granularities)
 
     if is_per_tensor or is_per_row:
-        assert is_sm_at_least_89() or is_MI300(), (
-            "Float8 dynamic quantization requires CUDA compute capability ≥8.9 or MI300+."
-        )
+        if torch.cuda.is_available():
+            assert is_sm_at_least_89() or is_MI300(), (
+                "Float8 dynamic quantization requires CUDA compute capability ≥8.9 or MI300+."
+            )
     elif is_a_1_128_w_128_128:
         # TODO(future PR): look into AMD support
-        assert is_sm_at_least_89(), (
-            "Float8 1x128 activation and 128x128 weight scaling requires CUDA compute capability ≥8.9."
-        )
+        if torch.cuda.is_available():
+            assert is_sm_at_least_89(), (
+                "Float8 1x128 activation and 128x128 weight scaling requires CUDA compute capability ≥8.9."
+            )
     else:
         raise ValueError(f"Invalid granularities {granularities}.")
