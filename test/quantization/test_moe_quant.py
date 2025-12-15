@@ -116,7 +116,7 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_int4wo_fake_dim(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
 
         config = MoEQuantConfig(
@@ -139,9 +139,9 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_int4wo_base(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
-        if not is_sm_at_least_90():
+        if torch.cuda.is_available() and not is_sm_at_least_90():
             self.skipTest("Requires CUDA capability >= 9.0")
 
         config = MoEQuantConfig(Int4WeightOnlyConfig(version=1))
@@ -161,7 +161,7 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_int8wo_fake_dim(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
 
         config = MoEQuantConfig(
@@ -183,7 +183,7 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_int8wo_base(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
 
         config = MoEQuantConfig(Int8WeightOnlyConfig())
@@ -220,7 +220,7 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_int8dq_fake_dim(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
 
         config = MoEQuantConfig(
@@ -243,7 +243,7 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_int8dq_base(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
 
         config = MoEQuantConfig(Int8DynamicActivationInt8WeightConfig())
@@ -264,9 +264,9 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_fp8wo_fake_dim(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
-        if not is_sm_at_least_90():
+        if torch.cuda.is_available() and not is_sm_at_least_90():
             self.skipTest("Requires CUDA capability >= 9.0")
 
         config = MoEQuantConfig(
@@ -289,9 +289,9 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_fp8wo_base(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
-        if not is_sm_at_least_90():
+        if torch.cuda.is_available() and not is_sm_at_least_90():
             self.skipTest("Requires CUDA capability >= 9.0")
 
         config = MoEQuantConfig(Float8WeightOnlyConfig())
@@ -311,9 +311,9 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_fp8dq_fake_dim(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
-        if not is_sm_at_least_90():
+        if torch.cuda.is_available() and not is_sm_at_least_90():
             self.skipTest("Requires CUDA capability >= 9.0")
 
         config = MoEQuantConfig(
@@ -336,9 +336,9 @@ class TestMoEQuantCompile(unittest.TestCase):
         ]
     )
     def test_fp8dq_base(self, name, num_tokens, fullgraph):
-        if not torch.cuda.is_available():
+        if not torch.accelerator.is_available():
             self.skipTest("Need CUDA available")
-        if not is_sm_at_least_90():
+        if torch.cuda.is_available() and not is_sm_at_least_90():
             self.skipTest("Requires CUDA capability >= 9.0")
 
         config = MoEQuantConfig(Float8DynamicActivationFloat8WeightConfig())
