@@ -1989,9 +1989,6 @@ def _float8_dynamic_activation_float8_weight_transform(
     *,
     parameter_name: str = "weight",
 ):
-    assert is_sm_at_least_89() or is_MI300(), (
-        "Float8 dynamic activation quantization is only supported on CUDA>=8.9 and MI300+"
-    )
     if config.set_inductor_config:
         torchao.quantization.utils.recommended_inductor_config_setter()
 
