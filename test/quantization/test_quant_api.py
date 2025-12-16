@@ -563,7 +563,6 @@ class TestQuantFlow(TestCase):
             UIntXWeightOnlyConfig(dtype=torch.uint4),
         ],
     )
-    @skip_if_xpu("XPU enablement in progress")
     @skip_if_rocm("ROCm enablement in progress")
     def test_workflow_e2e_numerics(self, config):
         """
