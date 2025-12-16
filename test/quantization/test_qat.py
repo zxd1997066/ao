@@ -2013,7 +2013,6 @@ class TestQAT(TestCase):
         )
 
     @unittest.skipIf(_DEVICE is None, "skipping when GPU is not available")
-    @skip_if_xpu("XPU enablement in progress")
     @parametrize(
         "weight_dtype, granularity, dtype, module_type",
         [
