@@ -12,7 +12,7 @@ cd torchao && pip install . --no-build-isolation && cd ..
 
 python3 -c "import torch; import torchao; print(f'Torch version: {torch.__version__}')"
 
-pip install pytest expecttest parameterized accelerate hf_transfer 'modelscope!=1.15.0' transformers tabulate fire
+pip install pytest expecttest parameterized accelerate hf_transfer 'modelscope!=1.15.0' transformers tabulate fire bitsandbytes
 
 pytest -v -s --ignore=torchao/test/quantization/pt2e/test_x86inductor_fusion.py \
         torchao/test/quantization/pt2e/ \
