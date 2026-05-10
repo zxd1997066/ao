@@ -5,6 +5,8 @@ import argparse
 import csv
 import json
 import os
+import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -251,7 +253,327 @@ def analyze_failure_groups(failures):
     return analysis
 
 
-def write_analysis_report(output_dir: Path, week_tag: str, analysis):
+def _likely_source_file_from_test_file(test_file: str) -> str:
+    p = Path(test_file)
+    parts = p.parts
+    if not parts:
+        return "unknown"
+    if parts[0] != "test":
+        return "unknown"
+
+    if p.stem.startswith("test_"):
+        mod = p.stem[5:]
+        return str(Path("torchao") / Path(*parts[1:-1]) / f"{mod}.py").replace("\\", "/")
+    return str(Path("torchao") / Path(*parts[1:])).replace("\\", "/")
+
+
+def _summarize_message(msg: str, limit: int = 220) -> str:
+    text = (msg or "").replace("\n", " ").strip()
+    return text if len(text) <= limit else (text[:limit] + " ...")
+
+
+def _root_cause_hypothesis(file_failures: list, category: str) -> dict:
+    messages = [f.get("message", "") for f in file_failures if f.get("message")]
+    top_msg = messages[0] if messages else ""
+    msg_lower = top_msg.lower()
+
+    if "does not require grad" in msg_lower:
+        return {
+            "problem": "Backward path receives a tensor that is detached or never marked for autograd.",
+            "chain": [
+                "A test executes backward() with expected trainable activations.",
+                "An operand in backward matmul/add path has requires_grad=False.",
+                "Autograd rejects the graph with 'does not require grad'.",
+            ],
+            "checks": [
+                "Inspect backward implementation for .detach() / .data usage.",
+                "Print requires_grad for forward output and backward operands.",
+                "Validate custom tensor .to()/dequantization path preserves intended grad behavior.",
+            ],
+        }
+
+    if "not implemented" in msg_lower and "xpu" in msg_lower:
+        return {
+            "problem": "Operator is missing XPU kernel support on current torch/oneAPI stack.",
+            "chain": [
+                "Test invokes an op on XPU device.",
+                "Dispatcher cannot find XPU implementation.",
+                "Runtime raises not implemented for XPU.",
+            ],
+            "checks": [
+                "Confirm op availability on target torch/xpu version.",
+                "Add fallback path or skip guard for unsupported op.",
+                "Reduce operator surface in test to minimal supported variant.",
+            ],
+        }
+
+    if category == "import_error":
+        return {
+            "problem": "Dependency or module resolution issue in test/runtime environment.",
+            "chain": [
+                "Test imports feature-specific module.",
+                "Module/package is missing or version-mismatched.",
+                "Import fails before execution.",
+            ],
+            "checks": [
+                "Verify package installation and version pins.",
+                "Gate optional dependency tests with robust skip conditions.",
+                "Check PYTHONPATH / editable install state.",
+            ],
+        }
+
+    if category == "hardware":
+        return {
+            "problem": "Device/runtime capability mismatch (availability, memory, or driver/runtime setup).",
+            "chain": [
+                "Test assumes accelerator capability.",
+                "Runtime/device state cannot satisfy assumption.",
+                "Execution fails during device op dispatch.",
+            ],
+            "checks": [
+                "Validate torch.accelerator.is_available() and device identity.",
+                "Check driver/runtime compatibility and memory headroom.",
+                "Add stricter precondition checks or skip decorators.",
+            ],
+        }
+
+    return {
+        "problem": "Logic/assertion failure likely caused by behavior drift between backend paths.",
+        "chain": [
+            "Test expectation diverges from observed backend behavior.",
+            "One or more intermediate values differ from reference path.",
+            "Assertion/runtime guard fails.",
+        ],
+        "checks": [
+            "Compare intermediate tensors between reference and target backend.",
+            "Narrow repro to smallest failing nodeid.",
+            "Audit recent changes in related module and test assumptions.",
+        ],
+    }
+
+
+def _extract_code_snippet(path: Path, needles: list, context: int = 4):
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+
+    out = []
+    for needle in needles:
+        line_no = -1
+        for idx, line in enumerate(lines, start=1):
+            if needle in line:
+                line_no = idx
+                break
+        if line_no == -1:
+            continue
+        start = max(1, line_no - context)
+        end = min(len(lines), line_no + context)
+        snippet = "\n".join(lines[start - 1:end])
+        out.append({
+            "needle": needle,
+            "line": line_no,
+            "snippet": snippet,
+        })
+    return out
+
+
+def _run_git(repo_root: Path, args: list):
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_root)] + args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return ""
+    if res.returncode != 0:
+        return ""
+    return (res.stdout or "").strip()
+
+
+def _version_context(repo_root: Path):
+    ctx = {}
+    version_file = repo_root / "version.txt"
+    if version_file.exists():
+        try:
+            ctx["repo_version"] = version_file.read_text(encoding="utf-8").strip().splitlines()[0]
+        except Exception:
+            pass
+
+    torch_constraints = []
+    req_line = re.compile(r"^(torch|torchvision|torchaudio|pytorch)([<>=!~].*)?$", re.IGNORECASE)
+    for rel in ["dev-requirements.txt", "docs/requirements.txt", "requirements.txt"]:
+        p = repo_root / rel
+        if not p.exists():
+            continue
+        try:
+            for raw in p.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                norm = line.split("#", 1)[0].strip()
+                if not req_line.match(norm):
+                    continue
+                torch_constraints.append(f"{rel}: {norm}")
+        except Exception:
+            continue
+
+    if torch_constraints:
+        ctx["torch_constraints"] = list(dict.fromkeys(torch_constraints))[:8]
+    return ctx
+
+
+def _why_now_hypothesis(repo_root: Path, test_file: str, source_file: str, top_message: str):
+    test_log = _run_git(repo_root, ["log", "--oneline", "-n", "8", "--", test_file])
+    src_log = _run_git(repo_root, ["log", "--oneline", "-n", "8", "--", source_file]) if source_file else ""
+    head_log = _run_git(repo_root, ["log", "--oneline", "-n", "15"])
+    versions = _version_context(repo_root)
+
+    reasons = []
+    confidence = "low"
+
+    msg = (top_message or "").lower()
+    if "does not require grad" in msg:
+        reasons.append("Autograd contract around backward operands likely tightened, exposing latent requires_grad mismatch.")
+        confidence = "medium"
+    if src_log:
+        reasons.append("Recent commits touched likely source module, suggesting behavior drift on current branch.")
+        confidence = "medium"
+    if test_log:
+        reasons.append("Recent test updates may have increased coverage and now execute previously untested gradient paths.")
+        confidence = "medium"
+    if not reasons:
+        reasons.append("No strong change signal found; likely environment/runtime variance (backend, toolchain, or dependency versions).")
+
+    evidence = {
+        "source_recent_commits": src_log.splitlines()[:5] if src_log else [],
+        "test_recent_commits": test_log.splitlines()[:5] if test_log else [],
+        "head_recent_commits": head_log.splitlines()[:8] if head_log else [],
+        "version_context": versions,
+    }
+    return {
+        "confidence": confidence,
+        "reasons": reasons,
+        "evidence": evidence,
+    }
+
+
+def _deep_root_cause(file_path: str, file_failures: list, category: str, repo_root: Path):
+    messages = [f.get("message", "") for f in file_failures if f.get("message")]
+    nodeids = [f.get("nodeid", "") for f in file_failures if f.get("nodeid")]
+    top_msg = messages[0] if messages else ""
+    msg_lower = top_msg.lower()
+    likely_source = _likely_source_file_from_test_file(file_path)
+    likely_source_path = repo_root / likely_source
+
+    result = {
+        "likely_source": likely_source,
+        "problem_statement": "",
+        "mechanism": [],
+        "code_locations": [],
+        "fix_options": [],
+        "impact_scope": [],
+        "validation_steps": [],
+        "why_now": {
+            "confidence": "low",
+            "reasons": [],
+            "evidence": {},
+        },
+    }
+
+    if "does not require grad" in msg_lower:
+        result["problem_statement"] = (
+            "Backward path consumes a tensor that is not tracked by autograd, causing grad graph break on runtime checks."
+        )
+        result["mechanism"] = [
+            "Failing tests call backward() and expect input activation gradients.",
+            "NF4 conversion/dequantization path may return a plain tensor with requires_grad=False.",
+            "Backward matmul uses that tensor, autograd detects non-differentiable operand path and throws runtime error.",
+        ]
+        result["code_locations"] = _extract_code_snippet(
+            likely_source_path,
+            [
+                "class LinearNF4",
+                "def backward(ctx, grad_output)",
+                "def to_dtype(func, *args, **kwargs)",
+                "def get_original_weight(self)",
+            ],
+        )
+        result["fix_options"] = [
+            {
+                "title": "Option A: Make backward explicit about non-trainable NF4 weight",
+                "change": "Use an explicit non-grad path for weight operand in backward and keep gradient only for activation.",
+                "pros": "Minimal and aligned with frozen-weight design.",
+                "cons": "Needs careful check to avoid masking real grad-flow bugs.",
+            },
+            {
+                "title": "Option B: Adjust dtype conversion path grad semantics",
+                "change": "Ensure conversion/dequantization path preserves intended requires_grad behavior for backward operands.",
+                "pros": "Fixes root behavior in a central place.",
+                "cons": "Wider blast radius across NF4 ops and potentially other codepaths.",
+            },
+            {
+                "title": "Option C: Save reconstructed tensor explicitly for backward",
+                "change": "Store and reuse reconstructed weight tensor with clear grad semantics in autograd function.",
+                "pros": "Makes backward contract explicit and easier to reason about.",
+                "cons": "Potential memory and perf overhead.",
+            },
+        ]
+        result["impact_scope"] = [
+            "NF4 linear backward paths in quantization workflow.",
+            "Tests covering backward dtype behavior and quantize API compile/non-compile paths.",
+            "Potentially any training/inference path mixing NF4 wrappers and autograd-sensitive ops.",
+        ]
+        first_nodeid = nodeids[0] if nodeids else "test/quantization/quantize_/workflows/nf4/test_nf4_tensor.py::TestNF4Linear::test_backward_dtype_match_bfloat16"
+        result["validation_steps"] = [
+            f"pytest {first_nodeid} -xvs",
+            "pytest test/quantization/quantize_/workflows/nf4/test_nf4_tensor.py::TestNF4Linear::test_quantize_api -xvs",
+            "Run same subset on XPU and compare with CUDA/CPU behavior for regressions.",
+        ]
+        result["why_now"] = _why_now_hypothesis(repo_root, file_path, likely_source, top_msg)
+        return result
+
+    # Generic deep-dive fallback for non-NF4/non-grad signatures
+    result["problem_statement"] = "Primary failure appears to be backend-specific behavior mismatch against test expectations."
+    result["mechanism"] = [
+        "Test expectation and runtime backend behavior diverged.",
+        "One or more intermediate values/dispatch paths differ from reference path.",
+        "Assertion/runtime guard fails and surfaces as grouped failure signature.",
+    ]
+    result["code_locations"] = _extract_code_snippet(
+        likely_source_path,
+        ["def forward", "def backward", "@implements", "torch.accelerator"],
+    )
+    result["fix_options"] = [
+        {
+            "title": "Option A: Narrow failing repro and patch nearest backend-specific branch",
+            "change": "Use smallest failing nodeid and instrument intermediate states before changing logic.",
+            "pros": "Low regression risk.",
+            "cons": "May take longer to converge.",
+        },
+        {
+            "title": "Option B: Guard unsupported backend path",
+            "change": "Add robust skip/fallback checks where backend capability is missing.",
+            "pros": "Stabilizes CI quickly.",
+            "cons": "Can hide missing feature implementation.",
+        },
+    ]
+    result["impact_scope"] = [
+        "Current failing test module and nearby backend-conditional tests.",
+        "Operator coverage for target backend runtime.",
+    ]
+    if nodeids:
+        result["validation_steps"].append(f"pytest {nodeids[0]} -xvs")
+    result["validation_steps"].append("Re-run related test file on target backend after patch.")
+    result["why_now"] = _why_now_hypothesis(repo_root, file_path, likely_source, top_msg)
+    return result
+
+
+def write_analysis_report(output_dir: Path, week_tag: str, analysis, repo_root: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
     md_path = output_dir / f"failure_analysis_{week_tag}.md"
     json_path = output_dir / f"failure_summary_{week_tag}.json"
@@ -284,6 +606,108 @@ def write_analysis_report(output_dir: Path, week_tag: str, analysis):
         safe_msg = msg.replace('|', '\\|')[:100]
         lines.append(f"| {safe_msg}... | {count} |")
 
+    lines.extend(["", "## Detailed Root Cause Breakdown (Top 10 Files)"])
+    for file_path, file_failures in files_sorted[:10]:
+        if not file_path:
+            continue
+        sample_failure = file_failures[0]
+        category = categorize_failure(sample_failure.get('nodeid', ''), sample_failure.get('message', ''))
+        likely_source = _likely_source_file_from_test_file(file_path)
+        hypothesis = _root_cause_hypothesis(file_failures, category)
+        deep = _deep_root_cause(file_path, file_failures, category, repo_root)
+
+        nodeids = [f.get('nodeid', '') for f in file_failures if f.get('nodeid')]
+        unique_nodeids = list(dict.fromkeys(nodeids))
+
+        top_local_messages = defaultdict(int)
+        for ff in file_failures:
+            if ff.get('message'):
+                top_local_messages[ff['message']] += 1
+        local_msg_sorted = sorted(top_local_messages.items(), key=lambda x: (-x[1], x[0]))
+
+        lines.extend([
+            "",
+            f"### {file_path}",
+            f"- Failure count: {len(file_failures)}",
+            f"- Primary category: {category}",
+            f"- Likely source module: `{likely_source}`",
+            f"- Representative error: `{_summarize_message(sample_failure.get('message', ''))}`",
+            "- Failing tests (up to 12):",
+        ])
+        for nodeid in unique_nodeids[:12]:
+            lines.append(f"  - `{nodeid}`")
+
+        lines.append("- Top error signatures:")
+        for msg, count in local_msg_sorted[:5]:
+            lines.append(f"  - ({count}) `{_summarize_message(msg)}`")
+
+        lines.append(f"- Root cause hypothesis: {hypothesis['problem']}")
+        lines.append("- Causal chain:")
+        for step in hypothesis['chain']:
+            lines.append(f"  - {step}")
+
+        lines.append("- Verification checklist:")
+        for item in hypothesis['checks']:
+            lines.append(f"  - {item}")
+
+        if unique_nodeids:
+            lines.append("- Suggested targeted repro:")
+            lines.append(f"  - `pytest {unique_nodeids[0]} -xvs`")
+
+        lines.extend([
+            "",
+            "#### Deep Dive",
+            f"- Problem statement: {deep['problem_statement']}",
+            "- Mechanism:",
+        ])
+        for item in deep["mechanism"]:
+            lines.append(f"  - {item}")
+
+        lines.append("- Key code locations:")
+        if deep["code_locations"]:
+            for loc in deep["code_locations"]:
+                lines.append(f"  - `{deep['likely_source']}:{loc['line']}` (matched `{loc['needle']}`)")
+                lines.append("```python")
+                lines.append(loc["snippet"])
+                lines.append("```")
+        else:
+            lines.append("  - No source snippet found automatically; review likely source manually.")
+
+        lines.append("- Fix options:")
+        for opt in deep["fix_options"]:
+            lines.append(f"  - {opt['title']}")
+            lines.append(f"    - Change: {opt['change']}")
+            lines.append(f"    - Pros: {opt['pros']}")
+            lines.append(f"    - Cons: {opt['cons']}")
+
+        lines.append("- Impact scope:")
+        for scope in deep["impact_scope"]:
+            lines.append(f"  - {scope}")
+
+        lines.append("- Validation plan:")
+        for step in deep["validation_steps"]:
+            lines.append(f"  - {step}")
+
+        lines.append("- Why it fails now (heuristic):")
+        lines.append(f"  - Confidence: {deep['why_now'].get('confidence', 'low')}")
+        for reason in deep["why_now"].get("reasons", []):
+            lines.append(f"  - {reason}")
+
+        evidence = deep["why_now"].get("evidence", {})
+        src_commits = evidence.get("source_recent_commits", [])
+        test_commits = evidence.get("test_recent_commits", [])
+        ver_ctx = evidence.get("version_context", {})
+        if src_commits or test_commits or ver_ctx:
+            lines.append("- Why-now evidence:")
+            for c in src_commits[:3]:
+                lines.append(f"  - source commit: `{c}`")
+            for c in test_commits[:3]:
+                lines.append(f"  - test commit: `{c}`")
+            if ver_ctx.get("repo_version"):
+                lines.append(f"  - repo version: `{ver_ctx['repo_version']}`")
+            for constraint in ver_ctx.get("torch_constraints", [])[:3]:
+                lines.append(f"  - torch constraint: `{constraint}`")
+
     lines.extend([
         "", "## Recommendations", "",
         "### High Priority",
@@ -302,7 +726,31 @@ def write_analysis_report(output_dir: Path, week_tag: str, analysis):
         'week': week_tag,
         'total_failures': analysis['total'],
         'by_category': {cat: len(items) for cat, items in analysis['by_category'].items()},
-        'top_files': [{'file': name, 'count': len(items)} for name, items in files_sorted[:10]],
+        'top_files': [
+            {
+                'file': name,
+                'count': len(items),
+                'likely_source_module': _likely_source_file_from_test_file(name),
+                'top_nodeids': list(dict.fromkeys([f.get('nodeid', '') for f in items if f.get('nodeid')]))[:10],
+                'deep_root_cause': _deep_root_cause(
+                    name,
+                    items,
+                    categorize_failure(items[0].get('nodeid', ''), items[0].get('message', '')) if items else 'unknown',
+                    repo_root,
+                ),
+                'top_messages': [
+                    {'message': _summarize_message(m), 'count': c}
+                    for m, c in sorted(
+                        defaultdict(int, {
+                            msg: sum(1 for ff in items if ff.get('message') == msg)
+                            for msg in [ff.get('message', '') for ff in items if ff.get('message')]
+                        }).items(),
+                        key=lambda x: (-x[1], x[0])
+                    )[:5]
+                ],
+            }
+            for name, items in files_sorted[:10]
+        ],
     }
     json_path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
     return md_path, json_path
@@ -358,6 +806,91 @@ def write_fix_report(output_dir: Path, week_tag: str, llm_results: list, dry_run
     return md_path, json_path
 
 
+def write_pr_template(output_dir: Path, week_tag: str, analysis: dict,
+                      llm_results: list, dry_run: bool, analysis_only: bool):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pr_path = output_dir / f"pr_template_fix_{week_tag}.md"
+
+    changed_files = []
+    for item in llm_results:
+        for pr in item.get("patch_results", []):
+            if pr.get("changed") and pr.get("file"):
+                changed_files.append(pr["file"])
+    changed_files = list(dict.fromkeys(changed_files))
+
+    category_counts = {cat: len(items) for cat, items in analysis.get("by_category", {}).items()}
+    top_files = sorted(
+        analysis.get("by_file", {}).items(), key=lambda x: (-len(x[1]), x[0])
+    )[:10]
+
+    lines = [
+        f"# [XPU Failure Fix] {week_tag}",
+        "",
+        "## Summary",
+        f"- Week tag: {week_tag}",
+        f"- Total failures analyzed: {analysis.get('total', 0)}",
+        f"- Mode: {'analysis-only' if analysis_only else ('dry-run' if dry_run else 'apply-fixes')}",
+    ]
+
+    if category_counts:
+        lines.append("- Failure categories:")
+        for cat, cnt in sorted(category_counts.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"  - {cat}: {cnt}")
+
+    lines.extend([
+        "",
+        "## Root Cause Highlights",
+    ])
+    if top_files:
+        for f, items in top_files[:5]:
+            sample_msg = ""
+            if items and items[0].get("message"):
+                sample_msg = _summarize_message(items[0].get("message", ""))
+            lines.append(f"- {f}")
+            lines.append(f"  - Failures: {len(items)}")
+            if sample_msg:
+                lines.append(f"  - Representative error: {sample_msg}")
+    else:
+        lines.append("- No failing files found in current analysis payload.")
+
+    lines.extend([
+        "",
+        "## Fixes Included",
+    ])
+    if analysis_only:
+        lines.append("- Analysis only: no code changes were applied in this run.")
+    elif dry_run:
+        lines.append("- Dry-run only: proposed fixes were analyzed but not applied.")
+    elif changed_files:
+        for f in changed_files:
+            lines.append(f"- {f}")
+    else:
+        lines.append("- No patches were applied by automation in this run.")
+
+    lines.extend([
+        "",
+        "## Validation",
+        "- [ ] Re-run targeted failing tests on XPU",
+        "- [ ] Re-run relevant tests on CUDA/CPU to check regressions",
+        "- [ ] Verify updated failure report and fix report artifacts",
+        "",
+        "## Artifacts",
+        f"- reports/failure_analysis_{week_tag}.md",
+        f"- reports/failure_summary_{week_tag}.json",
+        f"- reports/fix_report_{week_tag}.md",
+        f"- reports/fix_report_{week_tag}.json",
+        f"- reports/pr_template_fix_{week_tag}.md",
+        "",
+        "## Checklist",
+        "- [ ] Confirm root cause and fix scope are accurate",
+        "- [ ] Confirm no unintended file changes",
+        "- [ ] Attach any additional benchmark/regression evidence if needed",
+    ])
+
+    pr_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return pr_path
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -378,6 +911,8 @@ def main():
                         help="GitHub token for Models API (falls back to GITHUB_TOKEN env var)")
     parser.add_argument("--repo-root", default=".",
                         help="Repository root where source files are located")
+    parser.add_argument("--analysis-only", action="store_true",
+                        help="Generate failure analysis reports only (skip LLM fix and fix report)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -391,7 +926,16 @@ def main():
 
     failures = read_failures(failure_csv)
     analysis = analyze_failure_groups(failures)
-    analysis_md, analysis_json = write_analysis_report(output_dir, week_tag, analysis)
+    analysis_md, analysis_json = write_analysis_report(output_dir, week_tag, analysis, Path(args.repo_root))
+
+    if args.analysis_only:
+        pr_template = write_pr_template(output_dir, week_tag, analysis, [], dry_run=True, analysis_only=True)
+        print(f"failure_csv={failure_csv}")
+        print(f"analysis_md={analysis_md}")
+        print(f"analysis_json={analysis_json}")
+        print(f"pr_template={pr_template}")
+        return 0
+
     by_file = group_failures(failures)
 
     llm_results = []
@@ -419,12 +963,18 @@ def main():
                 llm_results.append({"file": file, "suggestion": suggestion, "patch_results": patch_results})
 
     md_path, json_path = write_fix_report(output_dir, week_tag, llm_results, dry_run=not args.apply_fixes)
+    pr_template = write_pr_template(
+        output_dir, week_tag, analysis, llm_results,
+        dry_run=not args.apply_fixes,
+        analysis_only=False,
+    )
 
     print(f"failure_csv={failure_csv}")
     print(f"analysis_md={analysis_md}")
     print(f"analysis_json={analysis_json}")
     print(f"fix_report_md={md_path}")
     print(f"fix_report_json={json_path}")
+    print(f"pr_template={pr_template}")
     for item in llm_results:
         changed_any = any(p.get('changed') for p in item.get('patch_results', []))
         conf = item.get('suggestion', {}).get('confidence', '?')

@@ -5,6 +5,9 @@
 Run from repo root:
 
 ```bash
+# Analysis report only (recommended first step)
+python .github/skills/xpu-failure-fix/scripts/fix_failures.py --week-tag 20260513 --analysis-only
+
 # Rule-based fixes only (fast, no API call)
 python .github/skills/xpu-failure-fix/scripts/fix_failures.py --week-tag 20260513 --apply-fixes
 
@@ -23,10 +26,11 @@ Single entrypoint:
 This will:
 1. Read `reports/xpu_failures_20260513.csv`
 2. Categorize failures
-3. Generate `reports/failure_analysis_20260513.md`
+3. Generate `reports/failure_analysis_20260513.md` with detailed root cause breakdown by file
 4. Generate `reports/failure_summary_20260513.json`
-5. Apply known safe code fixes
-6. Generate `reports/fix_report_20260513.md`
+5. Optionally apply known safe code fixes
+6. Generate `reports/fix_report_20260513.md` when fix flow runs
+7. Generate `reports/pr_template_fix_20260513.md` for PR description
 
 ## Full Usage
 
@@ -60,6 +64,7 @@ python .github/skills/xpu-failure-fix/scripts/fix_failures.py \
 
 1. Review `failure_analysis_<week>.md`
 2. Review `fix_report_<week>.md`
-3. Fix remaining manual items (if any)
-4. Re-run targeted tests to verify
-5. Create PR with patch summary
+3. Review `pr_template_fix_<week>.md` and adjust wording if needed
+4. Fix remaining manual items (if any)
+5. Re-run targeted tests to verify
+6. Create PR with patch summary
