@@ -4,6 +4,7 @@ Generate weekly CUDA/XPU test report from logs and CSV.
 
 Usage:
     python generate_weekly_report.py [--csv-path ao_status.csv] [--xpu-log xpu_0407.txt] 
+                                     [--xpu-run-url https://github.com/<owner>/<repo>/actions/runs/<id>]
                                      [--output-dir reports] [--week-tag 20260506]
 """
 
@@ -464,6 +465,45 @@ def fetch_latest_scheduled_xpu_log(repo, workflow, token=None):
     }
 
 
+def fetch_xpu_log_by_run_id(repo, run_id, token=None):
+    """Fetch logs for a specific GitHub Actions run id."""
+    run_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}'
+    run = _github_request_json(run_url, token=token)
+
+    logs_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}/logs'
+    logs_zip = _github_request_bytes(logs_url, token=token)
+
+    all_logs = []
+    with zipfile.ZipFile(io.BytesIO(logs_zip)) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name_lower = info.filename.lower()
+            if not (name_lower.endswith('.txt') or name_lower.endswith('.log')):
+                continue
+            text = zf.read(info).decode('utf-8', errors='ignore')
+            all_logs.append(f'\n===== {info.filename} =====\n')
+            all_logs.append(text)
+
+    combined_log = ''.join(all_logs)
+    return {
+        'run_id': int(run_id),
+        'run_html_url': run.get('html_url', ''),
+        'run_created_at': run.get('created_at', ''),
+        'log_text': combined_log,
+    }
+
+
+def _extract_run_id_from_url(run_url):
+    """Extract numeric run id from a GitHub Actions run URL."""
+    if not run_url:
+        return None
+    match = re.search(r'/actions/runs/(\d+)', run_url)
+    if not match:
+        return None
+    return match.group(1)
+
+
 def _sanitize_filename(value):
     return re.sub(r'[^A-Za-z0-9._-]+', '_', value)
 
@@ -564,6 +604,14 @@ def main():
         help='Workflow file name or workflow id for Actions API'
     )
     parser.add_argument(
+        '--xpu-run-url', default='',
+        help='GitHub Actions run URL for XPU log (takes precedence over --fetch-latest-scheduled)'
+    )
+    parser.add_argument(
+        '--xpu-run-id', default='',
+        help='GitHub Actions run id for XPU log (takes precedence over --fetch-latest-scheduled)'
+    )
+    parser.add_argument(
         '--github-token', default=os.environ.get('GITHUB_TOKEN', ''),
         help='GitHub token (optional). Defaults to env GITHUB_TOKEN'
     )
@@ -592,7 +640,41 @@ def main():
     xpu_input_desc = args.xpu_log
     refresh_xpu_log = args.xpu_log
     xpu_failures = []
-    if args.fetch_latest_scheduled:
+    explicit_xpu_run_id = (args.xpu_run_id or '').strip()
+    if not explicit_xpu_run_id:
+        explicit_xpu_run_id = _extract_run_id_from_url((args.xpu_run_url or '').strip()) or ''
+
+    if explicit_xpu_run_id:
+        try:
+            fetched = fetch_xpu_log_by_run_id(
+                args.github_repo,
+                explicit_xpu_run_id,
+                token=args.github_token or None,
+            )
+            fetched_log_path = output_dir / f"xpu_run_{fetched['run_id']}.log"
+            with open(fetched_log_path, 'w', encoding='utf-8') as f:
+                f.write(fetched['log_text'])
+
+            refresh_xpu_log = str(fetched_log_path)
+            xpu_input_desc = (
+                f"github://{args.github_repo}/actions/runs/{fetched['run_id']}"
+            )
+            xpu_failures = parse_xpu_log_text(fetched['log_text'])
+            print(f"fetched_run_id={fetched['run_id']}")
+            print(f"fetched_run_url={fetched['run_html_url']}")
+            print(f"fetched_run_log={fetched_log_path}")
+        except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError) as e:
+            print(f"Error: failed to fetch XPU run by id/url: {e}", file=sys.stderr)
+            if os.path.exists(args.xpu_log):
+                print(
+                    f"Fallback: using local xpu log {args.xpu_log}",
+                    file=sys.stderr,
+                )
+                refresh_xpu_log = args.xpu_log
+                xpu_input_desc = args.xpu_log
+            else:
+                sys.exit(1)
+    elif args.fetch_latest_scheduled:
         try:
             fetched = fetch_latest_scheduled_xpu_log(
                 args.github_repo,
