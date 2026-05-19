@@ -580,7 +580,7 @@ def main():
         help='Workflow file for CUDA log fetch'
     )
     parser.add_argument(
-        '--cuda-job-keyword', default='CUDA 2.10',
+        '--cuda-job-keyword', default='CUDA 2.11',
         help='Job name keyword to pick CUDA job in regression workflow'
     )
     parser.add_argument(
