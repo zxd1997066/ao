@@ -512,40 +512,93 @@ def fetch_latest_successful_cuda_job_log(repo, workflow, job_keyword, token=None
     """Fetch log text from latest successful run's successful CUDA job (e.g. CUDA 2.10)."""
     runs_url = (
         f'https://api.github.com/repos/{repo}/actions/workflows/{workflow}/runs'
-        '?status=completed&per_page=30'
+        '?status=completed&per_page=100'
     )
     runs_data = _github_request_json(runs_url, token=token)
     workflow_runs = runs_data.get('workflow_runs', [])
 
-    for run in workflow_runs:
-        if run.get('conclusion') != 'success':
-            continue
+    fallback_keywords = [
+        'CUDA 2.12',
+        'CUDA 2.11',
+        'CUDA 2.10',
+        'CUDA Nightly',
+        'CUDA',
+    ]
+    fallback_keywords = [
+        k for k in fallback_keywords if k.lower() != job_keyword.lower()
+    ]
+    observed_cuda_names = []
 
-        run_id = run['id']
-        jobs_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100'
-        jobs_data = _github_request_json(jobs_url, token=token)
-        for job in jobs_data.get('jobs', []):
-            name = job.get('name', '')
-            if job_keyword.lower() not in name.lower():
-                continue
-            if job.get('conclusion') != 'success':
-                continue
+    def _search_runs(runs):
+        for run in runs:
+            run_id = run['id']
+            jobs_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100'
+            jobs_data = _github_request_json(jobs_url, token=token)
+            jobs = jobs_data.get('jobs', [])
 
-            job_id = job['id']
-            logs_url = f'https://api.github.com/repos/{repo}/actions/jobs/{job_id}/logs'
-            log_bytes = _github_request_bytes(logs_url, token=token)
-            log_text = log_bytes.decode('utf-8', errors='ignore')
-            return {
-                'run_id': run_id,
-                'run_html_url': run.get('html_url', ''),
-                'job_id': job_id,
-                'job_name': name,
-                'log_text': log_text,
-            }
+            # Pass 1: exact user keyword
+            for job in jobs:
+                name = job.get('name', '')
+                if 'cuda' in name.lower() and name not in observed_cuda_names:
+                    observed_cuda_names.append(name)
+                if job_keyword.lower() not in name.lower():
+                    continue
+                if job.get('conclusion') != 'success':
+                    continue
 
+                job_id = job['id']
+                logs_url = f'https://api.github.com/repos/{repo}/actions/jobs/{job_id}/logs'
+                log_bytes = _github_request_bytes(logs_url, token=token)
+                log_text = log_bytes.decode('utf-8', errors='ignore')
+                return {
+                    'run_id': run_id,
+                    'run_html_url': run.get('html_url', ''),
+                    'job_id': job_id,
+                    'job_name': name,
+                    'matched_keyword': job_keyword,
+                    'log_text': log_text,
+                }
+
+            # Pass 2: fallback keywords when exact keyword is not available
+            for fallback in fallback_keywords:
+                for job in jobs:
+                    name = job.get('name', '')
+                    if fallback.lower() not in name.lower():
+                        continue
+                    if job.get('conclusion') != 'success':
+                        continue
+
+                    job_id = job['id']
+                    logs_url = f'https://api.github.com/repos/{repo}/actions/jobs/{job_id}/logs'
+                    log_bytes = _github_request_bytes(logs_url, token=token)
+                    log_text = log_bytes.decode('utf-8', errors='ignore')
+                    return {
+                        'run_id': run_id,
+                        'run_html_url': run.get('html_url', ''),
+                        'job_id': job_id,
+                        'job_name': name,
+                        'matched_keyword': fallback,
+                        'log_text': log_text,
+                    }
+        return None
+
+    # First prefer fully successful workflow runs.
+    successful_runs = [r for r in workflow_runs if r.get('conclusion') == 'success']
+    result = _search_runs(successful_runs)
+    if result is not None:
+        return result
+
+    # Fallback: scan all completed runs in case workflow-level conclusion is not success
+    # but a CUDA job inside still succeeded and is usable for snapshot refresh.
+    result = _search_runs(workflow_runs)
+    if result is not None:
+        return result
+
+    observed_summary = ', '.join(observed_cuda_names[:6]) if observed_cuda_names else 'none'
     raise RuntimeError(
         f'No successful job matching "{job_keyword}" found in recent successful runs '
-        f'for {repo} workflow {workflow}'
+        f'for {repo} workflow {workflow}. '
+        f'Observed CUDA jobs: {observed_summary}'
     )
 
 
@@ -731,6 +784,11 @@ def main():
                 f"github://{args.cuda_github_repo}/{args.cuda_github_workflow} "
                 f"run_id={fetched_cuda['run_id']} job={fetched_cuda['job_name']}"
             )
+            matched_keyword = fetched_cuda.get('matched_keyword', args.cuda_job_keyword)
+            if matched_keyword.lower() != args.cuda_job_keyword.lower():
+                print(
+                    f"cuda_keyword_fallback={args.cuda_job_keyword}->{matched_keyword}"
+                )
             print(f"fetched_cuda_run_id={fetched_cuda['run_id']}")
             print(f"fetched_cuda_job_id={fetched_cuda['job_id']}")
             print(f"fetched_cuda_log={cuda_log_path}")
