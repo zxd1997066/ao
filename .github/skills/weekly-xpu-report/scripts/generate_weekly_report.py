@@ -26,6 +26,11 @@ from datetime import datetime
 from pathlib import Path
 
 
+NON_UT_WORKFLOWS = {
+    '4xH100_tests.yml',
+}
+
+
 def parse_csv(csv_path):
     """Parse ao_status.csv and return per-file counts."""
     data = {}
@@ -143,6 +148,32 @@ def parse_stateful_log_file(log_path):
     with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read()
     return parse_stateful_log_text(text)
+
+
+def parse_device_log_mapping(mapping_text):
+    """Parse 'DEVICE:path,DEVICE2:path2' into a dict."""
+    mapping = {}
+    raw = (mapping_text or '').strip()
+    if not raw:
+        return mapping
+
+    for item in raw.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if ':' not in item:
+            raise ValueError(
+                f"Invalid device log mapping '{item}'. Expected DEVICE:path"
+            )
+        device, path = item.split(':', 1)
+        device = device.strip()
+        path = path.strip()
+        if not device or not path:
+            raise ValueError(
+                f"Invalid device log mapping '{item}'. Empty device or path"
+            )
+        mapping[device] = path
+    return mapping
 
 
 def _distribute_collection_skips(rows, skip_field, collection_skips, excluded_file):
@@ -602,6 +633,344 @@ def fetch_latest_successful_cuda_job_log(repo, workflow, job_keyword, token=None
     )
 
 
+def _looks_like_cuda_runner(label):
+    l = (label or '').lower()
+    # Some ARC/OSDC runner labels (e.g. mt-l-...-h100) do not start with linux.
+    # Match on GPU device hints as the primary signal.
+    return (
+        'nvidia' in l
+        or 'h100' in l
+        or 'a100' in l
+        or '.g5.' in l
+        or '.g6.' in l
+    )
+
+
+def _pick_runner_label(labels):
+    for lb in labels or []:
+        if _looks_like_cuda_runner(lb):
+            return lb
+    return ''
+
+
+def fetch_latest_cuda_ut_results(repo, workflows, token=None, runs_per_workflow=50):
+    """Fetch latest successful CUDA UT job result for each workflow and aggregate by runner."""
+    by_runner = defaultdict(list)
+
+    for workflow in workflows:
+        if workflow in NON_UT_WORKFLOWS:
+            continue
+        runs_url = (
+            f'https://api.github.com/repos/{repo}/actions/workflows/{workflow}/runs'
+            f'?status=completed&per_page={int(runs_per_workflow)}'
+        )
+        runs_data = _github_request_json(runs_url, token=token)
+        workflow_runs = runs_data.get('workflow_runs', [])
+
+        selected = None
+        for run in workflow_runs:
+            run_conclusion = (run.get('conclusion') or '').lower()
+            if run_conclusion != 'success':
+                continue
+
+            run_id = run.get('id')
+            if not run_id:
+                continue
+
+            jobs_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100'
+            jobs_data = _github_request_json(jobs_url, token=token)
+            jobs = jobs_data.get('jobs', [])
+
+            for job in jobs:
+                conclusion = job.get('conclusion')
+                if (conclusion or '').lower() != 'success':
+                    continue
+
+                name = job.get('name', '')
+                if 'test' not in name.lower():
+                    continue
+
+                labels = job.get('labels', []) or []
+                runner_label = _pick_runner_label(labels)
+                if not runner_label:
+                    continue
+
+                selected = {
+                    'workflow': workflow,
+                    'run_id': run_id,
+                    'run_url': run.get('html_url', ''),
+                    'created_at': run.get('created_at', ''),
+                    'job_name': name,
+                    'conclusion': conclusion,
+                    'runner': runner_label,
+                    'event': run.get('event', ''),
+                }
+                break
+
+            if selected is not None:
+                break
+
+        if selected is not None:
+            by_runner[selected['runner']].append(selected)
+
+    return by_runner
+
+
+def _device_from_runner(runner_label):
+    label = (runner_label or '').lower()
+    m = re.search(r'h100\.(\d+)', label)
+    if m:
+        return f"H100x{m.group(1)}"
+    if 'h100' in label:
+        return 'H100'
+    if 'l4' in label or '.g6.' in label:
+        return 'L4'
+    if 'a100' in label:
+        return 'A100'
+    if '.g5.' in label:
+        return 'G5'
+    if 'nvidia' in label:
+        return 'NVIDIA_GPU'
+    return 'UNKNOWN'
+
+
+def write_cuda_ut_device_csv(output_dir, week_tag, cuda_ut_by_runner):
+    path = Path(output_dir) / f"cuda_ut_by_device_{week_tag}.csv"
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                'device',
+                'runner',
+                'workflow',
+                'job',
+                'conclusion',
+                'event',
+                'created_at',
+                'run_id',
+                'run_url',
+            ],
+        )
+        writer.writeheader()
+        for runner in sorted(cuda_ut_by_runner.keys()):
+            items = sorted(
+                cuda_ut_by_runner[runner],
+                key=lambda x: x.get('created_at', ''),
+                reverse=True,
+            )
+            for it in items:
+                writer.writerow({
+                    'device': _device_from_runner(runner),
+                    'runner': runner,
+                    'workflow': it.get('workflow', ''),
+                    'job': it.get('job_name', ''),
+                    'conclusion': it.get('conclusion', ''),
+                    'event': it.get('event', ''),
+                    'created_at': it.get('created_at', ''),
+                    'run_id': it.get('run_id', ''),
+                    'run_url': it.get('run_url', ''),
+                })
+    return path
+
+
+def append_cuda_ut_device_section_to_status_csv(status_csv_path, cuda_ut_by_runner):
+    if not cuda_ut_by_runner:
+        return
+
+    rows = []
+    for runner in sorted(cuda_ut_by_runner.keys()):
+        items = sorted(
+            cuda_ut_by_runner[runner],
+            key=lambda x: x.get('created_at', ''),
+            reverse=True,
+        )
+        for it in items:
+            rows.append([
+                _device_from_runner(runner),
+                runner,
+                it.get('workflow', ''),
+                it.get('job_name', ''),
+                it.get('conclusion', ''),
+                it.get('event', ''),
+                it.get('created_at', ''),
+                str(it.get('run_id', '')),
+                it.get('run_url', ''),
+            ])
+
+    if not rows:
+        return
+
+    with open(status_csv_path, 'a', encoding='utf-8', newline='') as f:
+        f.write('\n')
+        f.write('CUDA_UT_BY_DEVICE\n')
+        writer = csv.writer(f)
+        writer.writerow([
+            'device', 'runner', 'workflow', 'job', 'conclusion',
+            'event', 'created_at', 'run_id', 'run_url'
+        ])
+        for r in rows:
+            writer.writerow(r)
+
+
+def _device_key_from_runner(runner_label):
+    label = (runner_label or '').lower()
+    m = re.search(r'h100\.(\d+)', label)
+    if m:
+        return f"H100x{m.group(1)}"
+    if 'h100' in label:
+        return 'H100'
+    if '.g6.' in label or 'l4' in label:
+        return 'L4'
+    if '.g5.' in label:
+        return 'G5'
+    if 'a100' in label:
+        return 'A100'
+    if 'nvidia' in label:
+        return 'NVIDIA_GPU'
+    return re.sub(r'[^A-Za-z0-9]+', '_', runner_label or 'UNKNOWN').strip('_') or 'UNKNOWN'
+
+
+def fetch_latest_cuda_ut_file_results(repo, workflows, token=None, runs_per_workflow=15):
+    """Fetch per-file PASSED/SKIPPED counts from latest successful CUDA UT job per device."""
+    by_device = {}
+
+    for workflow in workflows:
+        if workflow in NON_UT_WORKFLOWS:
+            continue
+        runs_url = (
+            f'https://api.github.com/repos/{repo}/actions/workflows/{workflow}/runs'
+            f'?status=completed&per_page={int(runs_per_workflow)}'
+        )
+        runs_data = _github_request_json(runs_url, token=token)
+        workflow_runs = runs_data.get('workflow_runs', [])
+
+        for run in workflow_runs:
+            run_conclusion = (run.get('conclusion') or '').lower()
+            if run_conclusion != 'success':
+                continue
+
+            run_id = run.get('id')
+            if not run_id:
+                continue
+
+            jobs_url = f'https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100'
+            jobs_data = _github_request_json(jobs_url, token=token)
+            jobs = jobs_data.get('jobs', [])
+
+            selected_job = None
+            for job in jobs:
+                if (job.get('conclusion') or '').lower() != 'success':
+                    continue
+                name = job.get('name', '')
+                if 'test' not in name.lower():
+                    continue
+                labels = job.get('labels', []) or []
+                runner_label = _pick_runner_label(labels)
+                if not runner_label:
+                    continue
+                selected_job = (job, runner_label)
+                break
+
+            if selected_job is None:
+                continue
+
+            job, runner_label = selected_job
+            job_id = job.get('id')
+            if not job_id:
+                continue
+
+            log_url = f'https://api.github.com/repos/{repo}/actions/jobs/{job_id}/logs'
+            log_bytes = _github_request_bytes(log_url, token=token)
+            log_text = log_bytes.decode('utf-8', errors='ignore')
+            per_file_counts, _ = parse_stateful_log_text(log_text)
+
+            device = _device_key_from_runner(runner_label)
+            existing = by_device.get(device)
+            created_at = run.get('created_at', '')
+            if existing and existing.get('created_at', '') >= created_at:
+                break
+
+            by_device[device] = {
+                'device': device,
+                'runner': runner_label,
+                'workflow': workflow,
+                'job_name': job.get('name', ''),
+                'conclusion': job.get('conclusion', ''),
+                'event': run.get('event', ''),
+                'created_at': created_at,
+                'run_id': run_id,
+                'run_url': run.get('html_url', ''),
+                'files': per_file_counts,
+            }
+            break
+
+    return by_device
+
+
+def write_per_file_device_matrix_csv(output_dir, week_tag, csv_data, device_results, all_devices=None):
+    path = Path(output_dir) / f"ao_status_by_device_{week_tag}.csv"
+    devices = sorted(set(device_results.keys()) | set(all_devices or []))
+
+    all_files = set(csv_data.keys())
+    for dev in devices:
+        all_files.update(device_results[dev].get('files', {}).keys())
+
+    fieldnames = ['file', 'cuda_pass', 'cuda_skip', 'xpu_pass', 'xpu_skip']
+    for dev in devices:
+        fieldnames.extend([f'{dev}_pass', f'{dev}_skip'])
+
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for file_path in sorted(all_files):
+            base = csv_data.get(file_path, {
+                'cuda_pass': 0,
+                'cuda_skip': 0,
+                'xpu_pass': 0,
+                'xpu_skip': 0,
+            })
+            row = {
+                'file': file_path,
+                'cuda_pass': base['cuda_pass'],
+                'cuda_skip': base['cuda_skip'],
+                'xpu_pass': base['xpu_pass'],
+                'xpu_skip': base['xpu_skip'],
+            }
+            for dev in devices:
+                if dev not in device_results:
+                    row[f'{dev}_pass'] = '\\'
+                    row[f'{dev}_skip'] = '\\'
+                    continue
+
+                counts = device_results[dev].get('files', {}).get(file_path)
+                if counts is None:
+                    row[f'{dev}_pass'] = '\\'
+                    row[f'{dev}_skip'] = '\\'
+                    continue
+
+                row[f'{dev}_pass'] = int(counts.get('PASSED', 0))
+                row[f'{dev}_skip'] = int(counts.get('SKIPPED', 0))
+            writer.writerow(row)
+
+    return path
+
+
+def append_per_file_device_section_to_status_csv(status_csv_path, matrix_csv_path):
+    if not os.path.exists(matrix_csv_path):
+        return
+
+    with open(matrix_csv_path, 'r', encoding='utf-8') as src:
+        matrix_text = src.read().strip()
+    if not matrix_text:
+        return
+
+    with open(status_csv_path, 'a', encoding='utf-8', newline='') as dst:
+        dst.write('\n')
+        dst.write('PER_FILE_DEVICE_MATRIX\n')
+        dst.write(matrix_text)
+        dst.write('\n')
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate weekly CUDA/XPU test report'
@@ -635,6 +1004,37 @@ def main():
     parser.add_argument(
         '--cuda-job-keyword', default='CUDA 2.11',
         help='Job name keyword to pick CUDA job in regression workflow'
+    )
+    parser.add_argument(
+        '--include-cuda-ut-results',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Include latest CUDA UT results by runner in report (default: enabled)'
+    )
+    parser.add_argument(
+        '--cuda-ut-workflows',
+        default='regression_test.yml,nightly_smoke_test.yml,1xL4_tests.yml,1xH100_tests.yml',
+        help='Comma-separated workflow files used for CUDA UT runner summary'
+    )
+    parser.add_argument(
+        '--cuda-ut-runs-per-workflow',
+        type=int,
+        default=15,
+        help='How many recent completed runs to scan per CUDA UT workflow (default: 15)'
+    )
+    parser.add_argument(
+        '--include-per-file-device-matrix',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Generate per-file matrix with per-device CUDA UT pass/skip columns (default: enabled)'
+    )
+    parser.add_argument(
+        '--device-log-mapping',
+        default='',
+        help=(
+            "Optional local device logs in DEVICE:path format, comma-separated. "
+            "Example: H100:h100.txt,H100x4:h100x4.txt"
+        ),
     )
     parser.add_argument(
         '--refresh-status',
@@ -826,6 +1226,90 @@ def main():
 
     if not xpu_failures:
         xpu_failures = parse_xpu_log(refresh_xpu_log)
+
+    cuda_ut_by_runner = {}
+    per_file_device_matrix_path = ''
+    if args.include_cuda_ut_results:
+        local_device_results = {}
+        try:
+            local_mapping = parse_device_log_mapping(args.device_log_mapping)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        for device, log_path in local_mapping.items():
+            if not os.path.exists(log_path):
+                print(
+                    f"Warning: local device log not found for {device}: {log_path}",
+                    file=sys.stderr,
+                )
+                continue
+            try:
+                per_file_counts, _ = parse_stateful_log_file(log_path)
+                local_device_results[device] = {
+                    'device': device,
+                    'runner': f'local:{device}',
+                    'workflow': 'local-log',
+                    'job_name': os.path.basename(log_path),
+                    'conclusion': 'success',
+                    'event': 'manual',
+                    'created_at': '',
+                    'run_id': '',
+                    'run_url': '',
+                    'files': per_file_counts,
+                }
+                print(
+                    f"loaded_local_device_log={device}:{log_path} files={len(per_file_counts)}"
+                )
+            except Exception as e:
+                print(
+                    f"Warning: failed to parse local device log {device}:{log_path}: {e}",
+                    file=sys.stderr,
+                )
+
+        try:
+            ut_workflows = [w.strip() for w in args.cuda_ut_workflows.split(',') if w.strip()]
+            cuda_ut_by_runner = fetch_latest_cuda_ut_results(
+                args.cuda_github_repo,
+                ut_workflows,
+                token=args.github_token or None,
+                runs_per_workflow=args.cuda_ut_runs_per_workflow,
+            )
+        except Exception as e:
+            print(f"Warning: failed to fetch CUDA UT runner results: {e}", file=sys.stderr)
+            cuda_ut_by_runner = {}
+
+        if args.include_per_file_device_matrix:
+            try:
+                discovered_devices = sorted({_device_key_from_runner(r) for r in cuda_ut_by_runner.keys()})
+                device_results = {}
+                try:
+                    device_results = fetch_latest_cuda_ut_file_results(
+                        args.cuda_github_repo,
+                        ut_workflows,
+                        token=args.github_token or None,
+                        runs_per_workflow=args.cuda_ut_runs_per_workflow,
+                    )
+                except Exception as e:
+                    print(
+                        f"Warning: failed to fetch remote per-file device results: {e}",
+                        file=sys.stderr,
+                    )
+                # Local logs can add/override device file counts and may introduce new files.
+                device_results.update(local_device_results)
+                discovered_devices = sorted(set(discovered_devices) | set(local_device_results.keys()))
+                if device_results or discovered_devices:
+                    per_file_device_matrix_path = str(
+                        write_per_file_device_matrix_csv(
+                            output_dir,
+                            args.week_tag,
+                            csv_data,
+                            device_results,
+                            all_devices=discovered_devices,
+                        )
+                    )
+            except Exception as e:
+                print(f"Warning: failed to build per-file device matrix: {e}", file=sys.stderr)
     
     # Calculate totals
     cuda_pass = sum(row['cuda_pass'] for row in csv_data.values())
@@ -866,6 +1350,7 @@ def main():
     report_path = output_dir / f"weekly_report_{args.week_tag}.md"
     csv_snapshot_path = output_dir / f"ao_status_{args.week_tag}.csv"
     failure_csv_path = output_dir / f"xpu_failures_{args.week_tag}.csv"
+    cuda_ut_csv_path = output_dir / f"cuda_ut_by_device_{args.week_tag}.csv"
     
     # Write CSV snapshot
     if os.path.abspath(working_csv_path) != os.path.abspath(str(csv_snapshot_path)):
@@ -879,6 +1364,13 @@ def main():
         writer.writeheader()
         for failure in unique_failures:
             writer.writerow(failure)
+
+    # Write CUDA UT by-device CSV
+    if cuda_ut_by_runner:
+        cuda_ut_csv_path = write_cuda_ut_device_csv(output_dir, args.week_tag, cuda_ut_by_runner)
+        append_cuda_ut_device_section_to_status_csv(csv_snapshot_path, cuda_ut_by_runner)
+    if per_file_device_matrix_path:
+        append_per_file_device_section_to_status_csv(csv_snapshot_path, per_file_device_matrix_path)
     
     # Generate markdown report
     report_lines = [
@@ -895,6 +1387,32 @@ def main():
         f"| CUDA | {cuda_total} | {cuda_pass} | {cuda_skip} | {cuda_rate:.4f} |",
         f"| XPU | {xpu_total} | {xpu_pass} | {xpu_skip} | {xpu_rate:.4f} |",
         "",
+        "## CUDA UT Results By Runner",
+    ]
+
+    if cuda_ut_by_runner:
+        report_lines.extend([
+            "| Runner | Workflow | Job | Conclusion | Event | Created At | Run |",
+            "|---|---|---|---|---|---|---|",
+        ])
+        for runner in sorted(cuda_ut_by_runner.keys()):
+            items = sorted(
+                cuda_ut_by_runner[runner],
+                key=lambda x: x.get('created_at', ''),
+                reverse=True,
+            )
+            for it in items:
+                run_link = it.get('run_url', '')
+                run_cell = f"[run {it.get('run_id')}]({run_link})" if run_link else str(it.get('run_id', ''))
+                report_lines.append(
+                    f"| {runner} | {it.get('workflow', '')} | {it.get('job_name', '')} | "
+                    f"{it.get('conclusion', '')} | {it.get('event', '')} | {it.get('created_at', '')} | {run_cell} |"
+                )
+    else:
+        report_lines.append("- No CUDA UT runner results available (API unavailable or no concluded jobs found).")
+
+    report_lines.extend([
+        "",
         "## XPU Failure Analysis",
         f"- Total unique failed tests: {len(unique_failures)}",
         f"- Files with failures: {len(failures_by_file)}",
@@ -902,7 +1420,7 @@ def main():
         "### Failures By File (Top 30)",
         "| File | Failed Tests |",
         "|---|---:|",
-    ]
+    ])
     
     for file_path, count in failures_by_file[:30]:
         report_lines.append(f"| {file_path} | {count} |")
@@ -924,6 +1442,8 @@ def main():
         "### Artifacts",
         f"- CSV snapshot: {csv_snapshot_path}",
         f"- Failure list CSV: {failure_csv_path}",
+        f"- CUDA UT by device CSV: {cuda_ut_csv_path}",
+        f"- Per-file device matrix CSV: {per_file_device_matrix_path or 'not generated'}",
     ])
     
     with open(report_path, 'w', encoding='utf-8') as f:
@@ -933,6 +1453,9 @@ def main():
     print(f"report={report_path}")
     print(f"csv_snapshot={csv_snapshot_path}")
     print(f"failure_csv={failure_csv_path}")
+    print(f"cuda_ut_csv={cuda_ut_csv_path}")
+    if per_file_device_matrix_path:
+        print(f"per_file_device_matrix_csv={per_file_device_matrix_path}")
     print(f"summary_cuda={cuda_total},{cuda_pass},{cuda_skip},{cuda_rate:.4f}")
     print(f"summary_xpu={xpu_total},{xpu_pass},{xpu_skip},{xpu_rate:.4f}")
     print(f"xpu_failed_unique_tests={len(unique_failures)}")
