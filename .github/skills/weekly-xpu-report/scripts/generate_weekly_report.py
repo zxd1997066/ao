@@ -984,8 +984,8 @@ def main():
         help='Path to XPU CI log'
     )
     parser.add_argument(
-        '--cuda-log', default='cuda_0407.txt',
-        help='Path to CUDA CI log (used when --refresh-status is enabled)'
+        '--cuda-log', default='',
+        help='Path to CUDA CI log (used when --refresh-status is enabled). No default local log is used.'
     )
     parser.add_argument(
         '--fetch-latest-cuda',
@@ -1078,6 +1078,11 @@ def main():
     )
     
     args = parser.parse_args()
+
+    blocked_cuda_log_names = {'cuda_0407.txt'}
+
+    def _is_blocked_cuda_log(path_value):
+        return os.path.basename((path_value or '').strip()) in blocked_cuda_log_names
     
     if args.week_tag is None:
         args.week_tag = datetime.now().strftime('%Y%m%d')
@@ -1163,7 +1168,15 @@ def main():
             print(f"Warning: XPU log not found: {args.xpu_log}", file=sys.stderr)
         refresh_xpu_log = args.xpu_log
 
-    cuda_input_desc = args.cuda_log
+    if _is_blocked_cuda_log(args.cuda_log):
+        print(
+            'Error: cuda_0407.txt is blocked and cannot be used. '
+            'Use fetched CUDA job logs or provide a different --cuda-log path.',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    cuda_input_desc = args.cuda_log or 'unset'
     refresh_cuda_log = args.cuda_log
     if args.refresh_status and args.fetch_latest_cuda:
         try:
@@ -1194,7 +1207,13 @@ def main():
             print(f"fetched_cuda_log={cuda_log_path}")
         except (RuntimeError, urllib.error.URLError, urllib.error.HTTPError) as e:
             print(f"Error: failed to fetch latest CUDA log: {e}", file=sys.stderr)
-            if os.path.exists(args.cuda_log):
+            if args.cuda_log and os.path.exists(args.cuda_log):
+                if _is_blocked_cuda_log(args.cuda_log):
+                    print(
+                        'Error: cuda_0407.txt is blocked and cannot be used as fallback.',
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
                 print(
                     f"Fallback: using local cuda log {args.cuda_log}",
                     file=sys.stderr,
@@ -1203,6 +1222,14 @@ def main():
                 cuda_input_desc = args.cuda_log
             else:
                 sys.exit(1)
+
+    if args.refresh_status and not refresh_cuda_log:
+        print(
+            'Error: no CUDA log source available. Enable --fetch-latest-cuda '
+            'or pass --cuda-log <path> (excluding cuda_0407.txt).',
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if args.refresh_status:
         try:
